@@ -1,0 +1,386 @@
+{
+  "name": "change-review",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.4.12",
+  "publisher": "local",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "svn",
+    "review",
+    "diff",
+    "code review",
+    "baseline"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:changeReview.files"
+  ],
+  "main": "./src/extension.js",
+  "scripts": {
+    "selfcheck": "node tools/selfcheck.js",
+    "mockcheck": "node tools/mockcheck.js",
+    "preview": "node tools/preview.js",
+    "package": "npx -y @vscode/vsce@latest package --no-yarn --allow-missing-repository",
+    "install-local": "code --install-extension ./change-review-0.4.6.vsix --force",
+    "vcscheck": "node tools/vcscheck.js"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "changeReviewContainer",
+          "title": "%displayName%",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "changeReviewContainer": [
+        {
+          "id": "changeReview.files",
+          "name": "%view.name%",
+          "contextualTitle": "%displayName%",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "changeReview.refresh",
+        "title": "%cmd.refresh%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "changeReview.focusView",
+        "title": "%cmd.focusView%"
+      },
+      {
+        "command": "changeReview.openReview",
+        "title": "%cmd.openReview%"
+      },
+      {
+        "command": "changeReview.openDiff",
+        "title": "%cmd.openDiff%"
+      },
+      {
+        "command": "changeReview.acceptFile",
+        "title": "%cmd.acceptFile%"
+      },
+      {
+        "command": "changeReview.rejectFile",
+        "title": "%cmd.rejectFile%"
+      },
+      {
+        "command": "changeReview.markReviewed",
+        "title": "%cmd.markReviewed%"
+      },
+      {
+        "command": "changeReview.unmarkReviewed",
+        "title": "%cmd.unmarkReviewed%"
+      },
+      {
+        "command": "changeReview.markAllReviewed",
+        "title": "%cmd.markAllReviewed%",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "changeReview.clearReviewed",
+        "title": "%cmd.clearReviewed%",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "changeReview.nextUnreviewed",
+        "title": "%cmd.nextUnreviewed%",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "changeReview.revealFile",
+        "title": "%cmd.revealFile%"
+      },
+      {
+        "command": "changeReview.initBaseline",
+        "title": "%cmd.initBaseline%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "changeReview.updateBaseline",
+        "title": "%cmd.updateBaseline%",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "changeReview.configureExclude",
+        "title": "%cmd.configureExclude%",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "changeReview.showLog",
+        "title": "%cmd.showLog%"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "changeReview.refresh",
+          "when": "view == changeReview.files",
+          "group": "navigation@1",
+          "icon": "$(refresh)"
+        },
+        {
+          "command": "changeReview.initBaseline",
+          "when": "view == changeReview.files && !changeReview.hasBaseline",
+          "group": "navigation@3",
+          "icon": "$(add)"
+        },
+        {
+          "command": "changeReview.updateBaseline",
+          "when": "view == changeReview.files && changeReview.snapshotActive",
+          "group": "navigation@3",
+          "icon": "$(arrow-up)"
+        },
+        {
+          "command": "changeReview.markAllReviewed",
+          "when": "view == changeReview.files",
+          "group": "1_review@1",
+          "icon": "$(check-all)"
+        },
+        {
+          "command": "changeReview.clearReviewed",
+          "when": "view == changeReview.files",
+          "group": "1_review@2",
+          "icon": "$(clear-all)"
+        },
+        {
+          "command": "changeReview.configureExclude",
+          "when": "view == changeReview.files",
+          "group": "2_conf@1",
+          "icon": "$(filter)"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "changeReview.openReview",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "changeReview.openDiff",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "changeReview.acceptFile",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "2_action@1"
+        },
+        {
+          "command": "changeReview.rejectFile",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "2_action@2"
+        },
+        {
+          "command": "changeReview.markReviewed",
+          "when": "view == changeReview.files && viewItem == changeReviewFile",
+          "group": "3_mark@1"
+        },
+        {
+          "command": "changeReview.unmarkReviewed",
+          "when": "view == changeReview.files && viewItem == changeReviewFileDone",
+          "group": "3_mark@1"
+        },
+        {
+          "command": "changeReview.revealFile",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "4_nav@1"
+        },
+        {
+          "command": "changeReview.updateBaseline",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewRepo_snapshot/",
+          "group": "5_base@1"
+        },
+        {
+          "command": "changeReview.configureExclude",
+          "when": "view == changeReview.files && viewItem =~ /^changeReview/",
+          "group": "6_conf@1"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "changeReview.files",
+        "contents": "%welcome.noVcs%",
+        "when": "view == changeReview.files && !changeReview.hasBaseline"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Change Review",
+      "properties": {
+        "changeReview.includeUntracked": {
+          "type": "boolean",
+          "default": true,
+          "description": "%cfg.includeUntracked%"
+        },
+        "changeReview.sortReviewedLast": {
+          "type": "boolean",
+          "default": true,
+          "description": "%cfg.sortReviewedLast%"
+        },
+        "changeReview.autoRefreshInterval": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "%cfg.autoRefreshInterval%"
+        },
+        "changeReview.contextLines": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "description": "%cfg.contextLines%"
+        },
+        "changeReview.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "%cfg.showStatusBar%"
+        },
+        "changeReview.gitPath": {
+          "type": "string",
+          "default": "",
+          "description": "%cfg.gitPath%"
+        },
+        "changeReview.svnPath": {
+          "type": "string",
+          "default": "",
+          "description": "%cfg.svnPath%"
+        },
+        "changeReview.forceVcs": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "git",
+            "svn",
+            "snapshot"
+          ],
+          "default": "auto",
+          "description": "%cfg.forceVcs%"
+        },
+        "changeReview.vcsSearchDepth": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "%cfg.vcsSearchDepth%"
+        },
+        "changeReview.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%cfg.exclude%"
+        },
+        "changeReview.snapshotExclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/.svn/**",
+            "**/.hg/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/out/**",
+            "**/.next/**",
+            "**/target/**",
+            "**/bin/**",
+            "**/obj/**",
+            "**/.workbuddy/**",
+            "**/*.log",
+            "**/.DS_Store",
+            "**/Thumbs.db"
+          ],
+          "description": "%cfg.snapshotExclude%"
+        },
+        "changeReview.snapshotMaxFileSize": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 0,
+          "description": "%cfg.snapshotMaxFileSize%"
+        },
+        "changeReview.snapshotMaxFiles": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 100,
+          "description": "%cfg.snapshotMaxFiles%"
+        },
+        "changeReview.uiLanguage": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "zh",
+            "en"
+          ],
+          "enumDescriptions": [
+            "%cfg.uiLang.auto%",
+            "%cfg.uiLang.zh%",
+            "%cfg.uiLang.en%"
+          ],
+          "default": "auto",
+          "description": "%cfg.uiLanguage%"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "changeReview.openReview",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "focusedView == changeReview.files && viewItem =~ /^changeReviewFile/"
+      },
+      {
+        "command": "changeReview.acceptFile",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "focusedView == changeReview.files && viewItem =~ /^changeReviewFile/"
+      },
+      {
+        "command": "changeReview.rejectFile",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "focusedView == changeReview.files && viewItem =~ /^changeReviewFile/"
+      },
+      {
+        "command": "changeReview.markReviewed",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m",
+        "when": "focusedView == changeReview.files && viewItem == changeReviewFile"
+      },
+      {
+        "command": "changeReview.unmarkReviewed",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m",
+        "when": "focusedView == changeReview.files && viewItem == changeReviewFileDone"
+      },
+      {
+        "command": "changeReview.nextUnreviewed",
+        "key": "alt+n",
+        "mac": "alt+n",
+        "when": "focusedView == changeReview.files"
+      }
+    ]
+  }
+}

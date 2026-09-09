@@ -1,0 +1,8 @@
+.vscode/
+.workbuddy/
+.zcode/
+.reasonix/
+.trae/
+.claudecode/
+
+*.vsix

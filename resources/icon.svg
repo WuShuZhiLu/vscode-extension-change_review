@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- 纸文件主体：撑满画布（边距 4px），顶角翻折 -->
+  <path d="M12 8 H76 L104 36 V112 a8 8 0 0 1 -8 8 H20 a8 8 0 0 1 -8 -8 V16 a8 8 0 0 1 8 -8 Z"
+        fill="none" stroke="currentColor" stroke-width="7" stroke-linejoin="round"/>
+  <!-- 右上折角 -->
+  <path d="M76 8 V36 H104" fill="none" stroke="currentColor" stroke-width="7" stroke-linejoin="round"/>
+  <!-- 文件内的三行文字 -->
+  <line x1="26" y1="60"  x2="88" y2="60"  stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+  <line x1="26" y1="78"  x2="74" y2="78"  stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+  <line x1="26" y1="96"  x2="88" y2="96"  stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+  <!-- 右下角对勾（在画布内） -->
+  <path d="M56 106 L74 122 L106 82"
+        fill="none" stroke="#22c55e" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
