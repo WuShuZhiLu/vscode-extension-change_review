@@ -1,6 +1,6 @@
 {
   "displayName": "Change Review",
-  "description": "List local changes (Git / SVN / snapshot baseline for unversioned projects), check off each file as reviewed, and enter a diff review mode (editable, accept, reject, per-block).",
+  "description": "Designed for code change review, with support for Git, SVN, and unmanaged projects,check off each file as reviewed, and enter a diff review mode (editable, accept, reject, per-block).",
   "view.name": "Local Changes Review",
   "cmd.refresh": "Refresh",
   "cmd.focusView": "Focus Change List",
@@ -17,6 +17,7 @@
   "cmd.initBaseline": "Initialize Baseline",
   "cmd.updateBaseline": "Update Baseline",
   "cmd.configureExclude": "Configure Exclude Rules…",
+  "cmd.blockFile": "Ignore File (Add to .crignore)",
   "welcome.noVcs": "This project is not under git / svn.\nInitialize a baseline to start reviewing local files like git changes.\n[Initialize Baseline](command:changeReview.initBaseline)\n\nAdd build artifacts to the [exclude rules](command:changeReview.configureExclude) so they don't pollute the list.",
   "cfg.includeUntracked": "Whether to include untracked (??) new files in the review list.",
   "cfg.sortReviewedLast": "Place reviewed files at the bottom of the list.",

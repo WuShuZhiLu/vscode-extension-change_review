@@ -48,7 +48,7 @@ async function detectIn(dir, opts) {
       try {
         const found = await gitProvider.detect(dir, opts.searchDepth);
         if (found) {
-          const p = new gitProvider.GitProvider(found.root, { exclude: opts.exclude });
+          const p = new gitProvider.GitProvider(found.root, { exclude: opts.exclude, excludeSets: opts.excludeSets });
           // 若 git 根高于打开目录（向上探测命中），改动只显示打开目录内
           p.addScope(dir);
           return { provider: p, kind: 'git' };
@@ -66,7 +66,7 @@ async function detectIn(dir, opts) {
       try {
         const found = svnProvider.detect(dir, opts.searchDepth);
         if (found) {
-          const p = new svnProvider.SvnProvider(found.root, { exclude: opts.exclude });
+          const p = new svnProvider.SvnProvider(found.root, { exclude: opts.exclude, excludeSets: opts.excludeSets });
           p.addScope(dir);
           return { provider: p, kind: 'svn' };
         }
@@ -78,7 +78,7 @@ async function detectIn(dir, opts) {
     if (kind === 'snapshot') {
       if (!opts.allowSnapshot) { continue; }
       return {
-        provider: new snapshotProvider.SnapshotProvider(dir, opts.storageDir, Object.assign({}, opts.snapshotOptions, { runtimeExclude: opts.exclude })),
+        provider: new snapshotProvider.SnapshotProvider(dir, opts.storageDir, Object.assign({}, opts.snapshotOptions, { runtimeExclude: opts.exclude, excludeSets: opts.excludeSets })),
         kind: 'snapshot'
       };
     }
@@ -165,7 +165,7 @@ async function buildProviders(folders, opts = {}) {
         push(new snapshotProvider.SnapshotProvider(
           folder,
           options.storageDir,
-          Object.assign({}, options.snapshotOptions, { runtimeExclude: options.exclude })
+          Object.assign({}, options.snapshotOptions, { runtimeExclude: options.exclude, excludeSets: options.excludeSets })
         ));
       }
     }

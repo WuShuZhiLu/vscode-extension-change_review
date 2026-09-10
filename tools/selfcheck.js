@@ -147,6 +147,27 @@ async function main() {
     check(`${name}（${p} ← ${JSON.stringify(pats)}）`, util.matchAny(p, pats) === want, `期望 ${want}`);
   }
 
+  console.log('\n[8.1] 项目忽略文件按「规则文件所在目录」锚定（同 .gitignore 语义）');
+  // 规则文件在 /proj/sub2，规则是相对 /proj/sub2 的路径；
+  // 而 provider 拿到的 relPath 是相对仓库根 /proj 的（多了 sub2/ 前缀）。
+  const sets = [{ base: path.posix.join('/proj', 'sub2'), rules: ['components/api/file_server_lib/web_assets/web_assets_version.csv'] }];
+  const setCases = [
+    [path.posix.join('/proj', 'sub2', 'components/api/file_server_lib/web_assets/web_assets_version.csv'), true, '子目录内的目标文件被命中（这正是之前失效的场景）'],
+    [path.posix.join('/proj', 'other', 'components/api/file_server_lib/web_assets/web_assets_version.csv'), false, '规则文件所在目录之外的同名路径不误伤'],
+    [path.posix.join('/proj', 'sub2', 'components/api/other.csv'), false, '同目录内其它文件不受影响']
+  ];
+  for (const [abs, want, name] of setCases) {
+    check(`${name}`, util.matchExcludeSets(abs, sets) === want, `期望 ${want}`);
+  }
+  check('裸文件名规则按其所在目录锚定（sub2/other.txt 命中）',
+    util.matchExcludeSets(path.posix.join('/proj', 'sub2', 'other.txt'), [{ base: path.posix.join('/proj', 'sub2'), rules: ['other.txt'] }]) === true);
+  check('规则文件外的同名文件不被裸文件名规则命中',
+    util.matchExcludeSets(path.posix.join('/proj', 'other', 'other.txt'), [{ base: path.posix.join('/proj', 'sub2'), rules: ['other.txt'] }]) === false);
+  check('relFromBase：base 之下的返回 posix 相对路径',
+    util.relFromBase(path.posix.join('/proj', 'sub2'), path.posix.join('/proj', 'sub2', 'a', 'b.txt')) === 'a/b.txt');
+  check('relFromBase：base 之外的返回 null',
+    util.relFromBase(path.posix.join('/proj', 'sub2'), path.posix.join('/proj', 'other', 'b.txt')) === null);
+
   console.log('\n[9] 相近的多处改动保持在同一块（0.4.3 起，不再按簇拆分）');
   const merged = [
     'diff --git a/x.js b/x.js',

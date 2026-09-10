@@ -211,7 +211,7 @@ async function main() {
   check('HTML 会上报 ready 消息', lastPanel.webview.html.includes("type: 'ready'"));
   // 接受/拒绝按钮文字精简，语义说明放在原生 title 上悬浮显示
   check('接受按钮语义放进悬浮提示（不再声明 git add）',
-    /data-cmd="accept"[^>]*title="[^"]*标记为已审查[^"]*暂存[^"]*"/.test(lastPanel.webview.html),
+    /data-cmd="accept"[^>]*title="[^"]*标记已审查[^"]*暂存[^"]*"/.test(lastPanel.webview.html),
     lastPanel.webview.html.match(/<button[^>]*data-cmd="accept"[^>]*>/)[0]);
   check('拒绝按钮文字是\"拒绝\"（语义已放进悬浮提示）', /data-cmd="reject"[^>]*title="[^"]*还原[^"]*"/.test(lastPanel.webview.html),
     lastPanel.webview.html.match(/<button[^>]*data-cmd="reject"[^>]*>/)[0]);
@@ -220,35 +220,10 @@ async function main() {
   await lastPanel._msg({ type: 'ready' });
   check('ready 消息被记录到 Output', vscode._output.lines.some((l) => /收到消息 type=ready/.test(l)));
   check('工具栏文件级接受/拒绝仍在', lastPanel.webview.html.includes('data-cmd="accept"') && lastPanel.webview.html.includes('data-cmd="reject"'));
-
-  // 缩进跟随 VSCode 设置（0.4.12 bug：Tab 硬塞真 \t，insertSpaces 时被浏览器按 8 列渲染，
-  // 表现为"设了 4 却给 8"）。这里做静态断言 + 算法边界验证。
-  const indentM = lastPanel.webview.html.match(/window\.__CR_INDENT__ = (\{[^}]*\})/);
-  check('面板注入了缩进设置 __CR_INDENT__', !!indentM, indentM ? indentM[1] : 'MISSING');
-  if (indentM) {
-    const ind = JSON.parse(indentM[1]);
-    check('缩进设置来自 editor.tabSize（mock 默认 4）', ind.tabSize === 4, JSON.stringify(ind));
-    check('缩进设置来自 editor.insertSpaces（mock 默认 true）', ind.insertSpaces === true, JSON.stringify(ind));
-  }
-  check('Tab 分支按 insertSpaces 选择空格/制表符', /INDENT\.insertSpaces \? spaces\(/.test(lastPanel.webview.html));
-  // execCommand('delete') 只出现在 Shift+Tab 反缩进分支里（其余分支都用 insertText）
-  check('Shift+Tab 反缩进分支存在', /e\.shiftKey/.test(lastPanel.webview.html) && /execCommand\('delete'\)/.test(lastPanel.webview.html));
-  check('不再无条件插入制表符', !/insertText', false, '\\t';\s*\n\s*return;\s*\n\s*\}/.test(lastPanel.webview.html));
-  // 算法边界：与 webview 内表达式保持一致（lead=行首空白长度, TAB_SIZE=4）
-  const TS = 4;
-  const indentNeed = (lead) => TS - (lead % TS);                 // 补到下一个 tab stop
-  const outdentCut = (lead) => Math.min((lead % TS) || TS, lead); // 回退到上一个 tab stop
-  check('缩进补齐：0→4 / 2→2 / 4→4 / 6→2 / 8→4',
-    [indentNeed(0), indentNeed(2), indentNeed(4), indentNeed(6), indentNeed(8)].join(',') === '4,2,4,2,4',
-    [indentNeed(0), indentNeed(2), indentNeed(4), indentNeed(6), indentNeed(8)].join(','));
-  check('反缩进：1→1 / 4→4 / 6→2 / 8→4 / 0→0',
-    [outdentCut(1), outdentCut(4), outdentCut(6), outdentCut(8), outdentCut(0)].join(',') === '1,4,2,4,0',
-    [outdentCut(1), outdentCut(4), outdentCut(6), outdentCut(8), outdentCut(0)].join(','));
-  // 对齐性质（VSCode 的真实行为）：缩进后 / 反缩进后，行首空白都落在 tab stop 上。
-  // 注意：不保证精确抵消——1 个空格按 Tab 补到 4，再 Shift+Tab 会退回 0（按 stop 对齐，非按字符回退）。
-  check('缩进后行首对齐到 tab stop', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].every((l) => (l + indentNeed(l)) % TS === 0));
-  check('反缩进后行首对齐到 tab stop', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].every((l) => (l - outdentCut(l)) % TS === 0));
-  check('反缩进不越过行首', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].every((l) => outdentCut(l) <= l));
+  check('面板含右键菜单容器', lastPanel.webview.html.includes('id="ctxmenu"'));
+  check('右键菜单含「屏蔽此文件」项', /data-ctx="blockFile"[^>]*>[\s\S]{0,80}屏蔽/.test(lastPanel.webview.html)
+    || lastPanel.webview.html.includes('data-ctx="blockFile"'), lastPanel.webview.html.match(/data-ctx="blockFile"[^>]*>[^<]*/));
+  check('工具栏含「屏蔽此文件」按钮', lastPanel.webview.html.includes('data-cmd="blockFile"'));
 
   console.log('\n[6] 接受 / 拒绝（0.4.5：接受不再 git add）');
   await registered.get('changeReview.acceptFile')({ repoRoot: ROOT, relPath: 'new.txt' });
@@ -256,11 +231,11 @@ async function main() {
   let st = g(['status', '--porcelain']);
   check('接受只标记已审查、不 git add', !/^A\s+new\.txt$/m.test(st), st);
   let accRoots = await treeView.opts.treeDataProvider.getChildren();
-  check('接受后 new.txt 已标记为已审查', accRoots.find((n) => n.label === 'new.txt').file.reviewed === true);
+  check('接受后 new.txt 已标记已审查', accRoots.find((n) => n.label === 'new.txt').file.reviewed === true);
 
-  console.log('\n[6.1] git 暂存只在「标记为已审查」时发生（勾选 add / 取消 reset）');
+  console.log('\n[6.1] git 暂存只在「标记已审查」时发生（勾选 add / 取消 reset）');
   let nn = accRoots.find((n) => n.label === 'new.txt');
-  await treeView._cbListener({ items: [[nn, 1]] }); // 勾选 = 标记为已审查
+  await treeView._cbListener({ items: [[nn, 1]] }); // 勾选 = 标记已审查
   await new Promise((r) => setTimeout(r, 80));
   st = g(['status', '--porcelain']);
   check('勾选已审查 → git add（new.txt 进入暂存区）', /^A\s+new\.txt$/m.test(st), st);
@@ -377,6 +352,52 @@ async function main() {
   // 模拟用户在文件里填了排除规则并保存
   fs.writeFileSync(path.join(ROOT, '.crignore'), '# test\n**/dist/**\n', 'utf8');
   check('排除规则能写回磁盘', fs.readFileSync(path.join(ROOT, '.crignore'), 'utf8').includes('**/dist/**'));
+
+  // 没有 .crignore 时 → 默认回退用 .gitignore 的规则（git 工程不必额外配 .crignore）
+  const crigPath = path.join(ROOT, '.crignore');
+  const backup = fs.existsSync(crigPath) ? fs.readFileSync(crigPath, 'utf8') : null;
+  if (backup !== null) { fs.unlinkSync(crigPath); }
+  fs.mkdirSync(path.join(ROOT, 'gignored'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'gignored/x.txt'), 'x\n', 'utf8');
+  fs.writeFileSync(path.join(ROOT, '.gitignore'), 'gignored/\n', 'utf8');
+  await registered.get('changeReview.refresh')();
+  let rootsGi = await treeView.opts.treeDataProvider.getChildren();
+  const giNode = rootsGi.find((n) => n.label === 'x.txt');
+  check('无 .crignore 时回退 .gitignore：被规则命中的文件不进列表', !giNode,
+    JSON.stringify(rootsGi.map((n) => n.label)));
+  fs.unlinkSync(path.join(ROOT, '.gitignore'));
+  if (backup !== null) { fs.writeFileSync(crigPath, backup, 'utf8'); }
+  fs.rmSync(path.join(ROOT, 'gignored'), { recursive: true, force: true });
+  await registered.get('changeReview.refresh')();
+
+  console.log('\n[9.3.1] 面板右键「屏蔽此文件」：写入 .crignore 并从列表消失');
+  // 造一个真实待审文件
+  fs.writeFileSync(path.join(ROOT, 'blockme.txt'), 'hello\n', 'utf8');
+  await registered.get('changeReview.refresh')();
+  let rootsB = await treeView.opts.treeDataProvider.getChildren();
+  check('屏蔽前文件在列表中', !!rootsB.find((n) => n.label === 'blockme.txt'),
+    JSON.stringify(rootsB.map((n) => n.label)));
+  const crigBak = fs.existsSync(crigPath) ? fs.readFileSync(crigPath, 'utf8') : null;
+  if (fs.existsSync(crigPath)) { fs.unlinkSync(crigPath); }
+  // 面板当前文件切到 blockme.txt，再通过面板消息触发（与真实右键一致）
+  await registered.get('changeReview.openReview')({ repoRoot: ROOT, relPath: 'blockme.txt' });
+  await lastPanel._msg({ type: 'ctxCmd', cmd: 'blockFile' });
+  await new Promise((r) => setTimeout(r, 120));
+  check('屏蔽后 .crignore 已创建', fs.existsSync(crigPath));
+  check('.crignore 含该文件的相对路径规则',
+    fs.existsSync(crigPath) && fs.readFileSync(crigPath, 'utf8').split(/\r?\n/).includes('blockme.txt'),
+    fs.existsSync(crigPath) ? fs.readFileSync(crigPath, 'utf8') : '(无)');
+  let rootsB2 = await treeView.opts.treeDataProvider.getChildren();
+  check('屏蔽后文件从列表消失', !rootsB2.find((n) => n.label === 'blockme.txt'),
+    JSON.stringify(rootsB2.map((n) => n.label)));
+  // 幂等：重复屏蔽不重复追加
+  fs.writeFileSync(path.join(ROOT, 'blockme.txt'), 'hello2\n', 'utf8');
+  await registered.get('changeReview.refresh')();
+  const beforeDup = fs.readFileSync(crigPath, 'utf8').split(/\r?\n/).filter((l) => l === 'blockme.txt').length;
+  check('重复屏蔽不重复写入规则', beforeDup === 1, `count=${beforeDup}`);
+  fs.rmSync(path.join(ROOT, 'blockme.txt'), { force: true });
+  if (crigBak !== null) { fs.writeFileSync(crigPath, crigBak, 'utf8'); }
+  await registered.get('changeReview.refresh')();
 
   console.log('\n[9.4] 接受不再整表重扫、不 git add：只标记已审查');
   const beforeAccept = vscode._executed.length;
@@ -548,7 +569,7 @@ async function main() {
   await lastPanel._msg({ type: 'ready' }); // [13] 的诊断会 clear() 日志，这里重发一次验证通道仍在
   check('ready 消息也收到了（说明 webview 脚本在跑）', vscode._output.lines.some((l) => /type=ready/.test(l)));
 
-  console.log('\n[18] 块级拒绝：延迟执行（标记为已审查时才还原）');
+  console.log('\n[18] 块级拒绝：延迟执行（标记已审查时才还原）');
   await lastPanel._msg({ type: 'hunkReject', index: 0, sig: sig0 });
   await new Promise((r) => setTimeout(r, 80));
   const aFileNow = treeView.opts.treeDataProvider.getChildren().find((n) => n.label.includes('a.js')).file;
@@ -557,7 +578,7 @@ async function main() {
     `before=${hunks.length} after=${afterReject.length}`);
   const rejData = stateStore['changeReview.reviewed.v1'];
   check('拒绝决定已持久化（rejected 表）', !!rejData && Object.keys(rejData).some((k) => k.endsWith('::rejected') && rejData[k][sig0]));
-  // 标记为已审查 → 执行拒绝块（还原）+ git add
+  // 标记已审查 → 执行拒绝块（还原）+ git add
   await lastPanel._msg({ type: 'mark' });
   await new Promise((r) => setTimeout(r, 150));
   const afterMark = parseDiff(await gitSvc2.getDiff(aEntry.repo.root, aFileNow, 3))[0].hunks;
@@ -570,6 +591,74 @@ async function main() {
   const rejData2 = stateStore['changeReview.reviewed.v1'];
   const rejLeft = Object.keys(rejData2 || {}).some((k) => k.endsWith('::rejected') && Object.keys(rejData2[k]).length);
   check('撤销拒绝后 rejected 表为空', !rejLeft);
+
+  console.log('\n[18.1] 行编辑键盘行为（Tab 跟随设置 / Enter 上行 / Ctrl+S）');
+  const beforeLines = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  // 用一行的原内容做基准：在其上方插行 → 该内容下移一行
+  const lineText = beforeLines[0];
+  await lastPanel._msg({ type: 'insertAbove', line: 1 });
+  await new Promise((r) => setTimeout(r, 120));
+  const afterAbove = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  check('行首回车 → 在第 1 行上方插空行', afterAbove[0] === '' && afterAbove[1] === lineText,
+    JSON.stringify(afterAbove.slice(0, 2)));
+  // 拆行：editLine + tail（光标在行中）
+  await lastPanel._msg({ type: 'editLine', line: 2, text: 'AA', insertBelow: true, tail: 'BB' });
+  await new Promise((r) => setTimeout(r, 120));
+  const afterSplit = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  check('行中回车 → 拆成上下两行', afterSplit[1] === 'AA' && afterSplit[2] === 'BB', JSON.stringify(afterSplit.slice(0, 3)));
+  // 面板脚本：Tab 缩进跟随 VSCode 设置注入
+  const html = lastPanel.webview.html;
+  check('面板注入了 Tab 缩进单位（跟随 editor.insertSpaces/tabSize）', /const INDENT = /.test(html));
+  check('面板声明了上行插行消息 insertAbove', /type: 'insertAbove'/.test(html));
+  check('面板接管 Ctrl+Z / Ctrl+C 组合键', /key === 'z' \|\| key === 'y'/.test(html) && /copySel\(el\)/.test(html));
+
+  // 合并行：向上（把第 2 行并进第 1 行）
+  const beforeMerge = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  await lastPanel._msg({ type: 'mergeLine', line: 2, dir: 'up', text: beforeMerge[1] });
+  await new Promise((r) => setTimeout(r, 120));
+  const afterMergeUp = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  check('上行合并：第 1 行 = 原第1行+第2行，总行数 -1',
+    afterMergeUp[0] === beforeMerge[0] + beforeMerge[1] && afterMergeUp.length === beforeMerge.length - 1,
+    `${JSON.stringify(afterMergeUp.slice(0, 2))} len ${beforeMerge.length}->${afterMergeUp.length}`);
+  // 合并行：向下（把第 2 行并进第 1 行，等价校验另一条分支）
+  const beforeDown = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  await lastPanel._msg({ type: 'mergeLine', line: 1, dir: 'down', text: beforeDown[0] });
+  await new Promise((r) => setTimeout(r, 120));
+  const afterMergeDown = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').split('\n');
+  check('下行合并：第 1 行 = 原第1行+第2行，总行数 -1',
+    afterMergeDown[0] === beforeDown[0] + beforeDown[1] && afterMergeDown.length === beforeDown.length - 1,
+    `${JSON.stringify(afterMergeDown.slice(0, 2))} len ${beforeDown.length}->${afterMergeDown.length}`);
+  // 面板：剪贴板自己接管（不依赖 VSCode 转发）
+  check('面板自行处理 Ctrl+V（读剪贴板）', /pasteInto\(el\)/.test(html) && /clipboard\.readText/.test(html));
+  check('面板自行处理 Ctrl+C/X（写剪贴板）', /clipboard\.writeText/.test(html) && /cutSel\(el\)/.test(html));
+  check('面板声明了合并行消息 mergeLine', /type: 'mergeLine'/.test(html));
+  // 行内操作不再触发全量刷新（卡顿来源）：日志里不应出现"刷新完成"
+  const linesBeforeOp = vscode._output.lines.length;
+  await lastPanel._msg({ type: 'editLine', line: 1, text: afterMergeDown[0], keepFocus: true });
+  await new Promise((r) => setTimeout(r, 120));
+  const newLines = vscode._output.lines.slice(linesBeforeOp).join('\n');
+  check('行内编辑走单文件复查（不再全量刷新）', !/刷新完成/.test(newLines), newLines.slice(0, 160));
+
+  // 文件级撤销：新增/删除/合并行也要能 Ctrl+Z（行内栈空时走文件快照）
+  const beforeUndoOp = fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8');
+  await lastPanel._msg({ type: 'insertAbove', line: 1 });
+  await new Promise((r) => setTimeout(r, 120));
+  check('插入行后文件变长', fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8') !== beforeUndoOp);
+  await lastPanel._msg({ type: 'undo' });
+  await new Promise((r) => setTimeout(r, 150));
+  check('Ctrl+Z 能撤销「插入行」（文件级快照）',
+    fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8') === beforeUndoOp,
+    JSON.stringify(fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8').slice(0, 60)));
+  await lastPanel._msg({ type: 'redo' });
+  await new Promise((r) => setTimeout(r, 150));
+  check('Ctrl+Y 能重做「插入行」',
+    fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8') !== beforeUndoOp);
+  await lastPanel._msg({ type: 'undo' });
+  await new Promise((r) => setTimeout(r, 150));
+  check('再次 Ctrl+Z 仍能撤销（撤销栈不会因为重做而失效）',
+    fs.readFileSync(path.join(ROOT, 'src/a.js'), 'utf8') === beforeUndoOp);
+  // 面板：有选区时不得触发合并（整行选中 + Backspace 应该删内容而不是并到上一行）
+  check('合并行要求无选区（hasSel 判断）', /!info\.hasSel && info\.atStart/.test(html));
 
   console.log('\n[19] 基准命令在 git 项目下的守卫');
   const infosBefore = vscode._infos.length;
@@ -741,6 +830,219 @@ async function mainSubdir() {
   try { fs.rmSync(ROOT3, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 }
 
+/**
+ * 回归（0.4.18 修复）：打开的是「仓库子目录」时，「屏蔽此文件」必须仍然生效。
+ * 根因：规则原先按「包含该文件的打开目录」写相对路径，而所有 provider 的 exclude
+ * 都是拿「相对来源根（git 仓库根）」的 relPath 去匹配的 → 两者基准不一致 → 规则永远匹配不上。
+ * 修法：规则基准改为来源根。
+ */
+async function mainSubdirBlock() {
+  console.log('\n[22] 打开仓库子目录时「屏蔽此文件」仍生效（规则按 .crignore 所在目录锚定，同 .gitignore）');
+  const RB = path.join(os.tmpdir(), `cr-mock-blocksub-${Date.now()}`);
+  const SUB = path.join(RB, 'sub2');
+  const rel = 'sub2/components/api/file_server_lib/web_assets/web_assets_version.csv';
+  fs.mkdirSync(path.dirname(path.join(RB, rel)), { recursive: true });
+  const gitB = (args) => execFileSync('git', args, { cwd: RB, encoding: 'utf8' });
+  gitB(['init', '-q']);
+  gitB(['config', 'user.email', 'b@local']);
+  gitB(['config', 'user.name', 'BlockSub']);
+  gitB(['config', 'core.autocrlf', 'false']);
+  fs.writeFileSync(path.join(RB, 'keep.txt'), 'keep\n', 'utf8');
+  gitB(['add', '-A']);
+  gitB(['commit', '-q', '-m', 'init']);
+  // 两个未跟踪文件（都会出现在改动列表，relPath 都相对「仓库根」）
+  fs.writeFileSync(path.join(RB, rel), 'a,b,c\n1,2,3\n', 'utf8');
+
+  vscode._infos.length = 0; vscode._errors.length = 0; vscode._warns.length = 0;
+  vscode._executed.length = 0; vscode._statusMsgs.length = 0;
+  vscode.workspace.workspaceFolders = [{ uri: Uri.file(SUB) }];
+  const stateB = {};
+  const contextB = {
+    subscriptions: [],
+    workspaceState: {
+      get: (k, d) => (stateB[k] === undefined ? d : stateB[k]),
+      update: (k, v) => { stateB[k] = v; return Promise.resolve(); }
+    }
+  };
+  const extB = require('../src/extension.js');
+  await extB.activate(contextB);
+  await new Promise((r) => setTimeout(r, 80));
+
+  let nodes = await treeView.opts.treeDataProvider.getChildren();
+  check('屏蔽前文件以「相对仓库根」的路径出现在列表', !!nodes.find((n) => n.file.relPath === rel),
+    JSON.stringify(nodes.map((n) => n.file.relPath)));
+
+  const igPath = path.join(SUB, '.crignore');
+  // --- 阶段 A：规则写的是「相对 .crignore 所在目录」的路径（同 .gitignore 语义）。
+  // 这正是 0.4.17 之前的写法 —— 只要匹配端也按 .crignore 所在目录锚定，它就应该是对的。
+  fs.writeFileSync(igPath, `# 排除规则\ncomponents/api/file_server_lib/web_assets/web_assets_version.csv\n`, 'utf8');
+  await registered.get('changeReview.refresh')();
+  await new Promise((r) => setTimeout(r, 80));
+  nodes = await treeView.opts.treeDataProvider.getChildren();
+  check('按 .crignore 所在目录锚定的规则能命中（同 .gitignore 语义）', !nodes.find((n) => n.file.relPath === rel),
+    JSON.stringify(nodes.map((n) => n.file.relPath)));
+
+  // --- 阶段 B：重新点一次「屏蔽此文件」→ 规则仍是「相对 .crignore 所在目录」，文件确实消失
+  fs.unlinkSync(igPath);
+  await registered.get('changeReview.refresh')();
+  await new Promise((r) => setTimeout(r, 80));
+  nodes = await treeView.opts.treeDataProvider.getChildren();
+  check('清掉 .crignore 后文件回到列表', !!nodes.find((n) => n.file.relPath === rel),
+    JSON.stringify(nodes.map((n) => n.file.relPath)));
+
+  await registered.get('changeReview.openReview')({ repoRoot: RB, relPath: rel });
+  await new Promise((r) => setImmediate(r));
+  await lastPanel._msg({ type: 'ctxCmd', cmd: 'blockFile' });
+  await new Promise((r) => setTimeout(r, 150));
+
+  check('.crignore 位于打开的子目录里', fs.existsSync(igPath), igPath);
+  const ruleLines = fs.readFileSync(igPath, 'utf8').split(/\r?\n/).filter(Boolean);
+  check('规则按 .crignore 所在目录写（不带 sub2/ 前缀，同 .gitignore 语义）',
+    ruleLines.includes('components/api/file_server_lib/web_assets/web_assets_version.csv'), JSON.stringify(ruleLines));
+  check('没有按来源根写（那反而是与 .gitignore 不一致的写法）', !ruleLines.includes(rel), JSON.stringify(ruleLines));
+  nodes = await treeView.opts.treeDataProvider.getChildren();
+  check('屏蔽后文件从列表消失（真的生效了）', !nodes.find((n) => n.file.relPath === rel),
+    JSON.stringify(nodes.map((n) => n.file.relPath)));
+
+  try { fs.rmSync(RB, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+}
+
+/**
+ * 回归：一个文件的**所有改动块都有决定**后，必须自动标记已审查。
+ * 用户反馈「有时候全打钩了，但没标记已审查」。
+ * 覆盖三种真实点击顺序，并验证标记之后再过一次全量刷新也不会掉。
+ */
+async function mainAllHunksAutoMark() {
+  console.log('\n[23] 块级决定齐全 → 自动标记已审查（含刷新、撤销拒绝等真实顺序）');
+  const { parseDiff, hunkSignature } = require('../src/diffParser');
+  const gitSvcC = require('../src/gitService');
+
+  // 每个子场景：独立仓库 + 一个「首行修改 + 末尾追加」的文件（git 会给 2 个块）
+  let seq = 0;
+  async function setup() {
+    seq += 1;
+    const RC = path.join(os.tmpdir(), `cr-mock-allhunks-${Date.now()}-${seq}`);
+    fs.mkdirSync(RC, { recursive: true });
+    const gitC = (args) => execFileSync('git', args, { cwd: RC, encoding: 'utf8' });
+    gitC(['init', '-q']);
+    gitC(['config', 'user.email', 'c@local']);
+    gitC(['config', 'user.name', 'AllHunks']);
+    gitC(['config', 'core.autocrlf', 'false']);
+    const base = Array.from({ length: 24 }, (_, i) => `const v${i} = ${i};`).join('\n') + '\n';
+    fs.writeFileSync(path.join(RC, 'f.js'), base, 'utf8');
+    gitC(['add', '-A']);
+    gitC(['commit', '-q', '-m', 'init']);
+    const mod = base.split('\n');
+    mod[0] = 'const v0 = 100;';
+    fs.writeFileSync(path.join(RC, 'f.js'), mod.join('\n') + 'const tail = 1;\n', 'utf8');
+
+    vscode._infos.length = 0; vscode._errors.length = 0; vscode._warns.length = 0;
+    vscode._executed.length = 0; vscode._statusMsgs.length = 0;
+    vscode.workspace.workspaceFolders = [{ uri: Uri.file(RC) }];
+    const stateC = {};
+    const contextC = {
+      subscriptions: [],
+      workspaceState: {
+        get: (k, d) => (stateC[k] === undefined ? d : stateC[k]),
+        update: (k, v) => { stateC[k] = v; return Promise.resolve(); }
+      }
+    };
+    const extC = require('../src/extension.js');
+    await extC.activate(contextC);
+    await new Promise((r) => setTimeout(r, 80));
+    const entry = treeView.opts.treeDataProvider.getChildren().find((n) => n.file.relPath === 'f.js');
+    const hunks = parseDiff(await gitSvcC.getDiff(entry.repo.root, entry.file, 3))[0].hunks;
+    await registered.get('changeReview.openReview')({ repoRoot: RC, relPath: 'f.js' });
+    await new Promise((r) => setImmediate(r));
+    return { RC, stateC, hunks, sigs: hunks.map((h) => hunkSignature(h)) };
+  }
+  const nodeOf = () => treeView.opts.treeDataProvider.getChildren().find((n) => n.file.relPath === 'f.js');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // A. 全部接受
+  {
+    const { RC, stateC, hunks, sigs } = await setup();
+    check('A: f.js 解析出 2 个改动块', hunks.length === 2, `实际 ${hunks.length}`);
+    for (let i = 0; i < sigs.length; i += 1) {
+      await lastPanel._msg({ type: 'hunkAccept', index: i, sig: sigs[i] });
+      await wait(60);
+    }
+    const node = nodeOf();
+    check('A: 全部接受 → 已标记已审查', !!node && node.file.reviewed === true,
+      node ? `reviewed=${node.file.reviewed}` : '文件不在列表里');
+    check('A: 标记写进了 workspaceState',
+      Object.keys(stateC['changeReview.reviewed.v1'] || {}).some((k) => k.includes('f.js')));
+    // 已审查后按钮文案：直接「取消审查」，不再带括号提示
+    await registered.get('changeReview.openReview')({ repoRoot: RC, relPath: 'f.js' });
+    await wait(60);
+    const markBtn = lastPanel.webview.html.match(/<button[^>]*data-cmd="mark"[^>]*>([^<]*)<\/button>/);
+    check('A: 已审查后按钮显示「取消审查」', !!markBtn && markBtn[1].trim() === '取消审查',
+      markBtn ? markBtn[1] : '(没找到按钮)');
+    check('A: 按钮文案不含括号提示', !!markBtn && !/[（(]/.test(markBtn[1]), markBtn ? markBtn[1] : '');
+    try { fs.rmSync(RC, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+
+  // B. 第一块拒绝 + 第二块接受（拒绝在标记时执行还原 → 内容变化后标记必须还在）
+  {
+    const { RC, stateC, sigs } = await setup();
+    await lastPanel._msg({ type: 'hunkReject', index: 0, sig: sigs[0] });
+    await wait(60);
+    await lastPanel._msg({ type: 'hunkAccept', index: 1, sig: sigs[1] });
+    await wait(120);
+    const node = nodeOf();
+    check('B: 拒绝一块 + 接受一块 → 文件被标记已审查', !!node && node.file.reviewed === true,
+      node ? `reviewed=${node.file.reviewed}` : '文件不在列表里');
+    check('B: 被拒绝的块已还原（首行回到 v0 = 0）',
+      fs.readFileSync(path.join(RC, 'f.js'), 'utf8').split('\n')[0] === 'const v0 = 0;',
+      fs.readFileSync(path.join(RC, 'f.js'), 'utf8').split('\n')[0]);
+    // 再过一次全量刷新：标记不能掉（hash 口径必须一致）
+    await registered.get('changeReview.refresh')();
+    await wait(100);
+    const node2 = nodeOf();
+    check('B: 全量刷新后标记依然在（不会「标记又丢了」）', !!node2 && node2.file.reviewed === true,
+      node2 ? `reviewed=${node2.file.reviewed}` : '文件不在列表里');
+    check('B: 标记确定写盘了',
+      Object.keys(stateC['changeReview.reviewed.v1'] || {}).some((k) => k.includes('f.js')));
+    try { fs.rmSync(RC, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+
+  // C. 接受一块 → 中途一次全量刷新（模拟自动刷新换掉 model 对象）→ 再接受剩下的
+  {
+    const { RC, sigs } = await setup();
+    await lastPanel._msg({ type: 'hunkAccept', index: 0, sig: sigs[0] });
+    await wait(60);
+    await registered.get('changeReview.refresh')();
+    await wait(100);
+    const mid = nodeOf();
+    check('C: 只决定了一块时不会被提前标记', !!mid && mid.file.reviewed !== true,
+      mid ? `reviewed=${mid.file.reviewed}` : '文件不在列表里');
+    await lastPanel._msg({ type: 'hunkAccept', index: 1, sig: sigs[1] });
+    await wait(120);
+    const node = nodeOf();
+    check('C: 刷新后再补上剩余的块 → 自动标记已审查', !!node && node.file.reviewed === true,
+      node ? `reviewed=${node.file.reviewed}` : '文件不在列表里');
+    try { fs.rmSync(RC, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+  // D. 审查途中文件改动被外部还原（diff 变空）→ 必须给出明确提示，不能静默崩掉
+  //    （旧代码 parseDiff(t)[0].hunks 会抛 TypeError，被吞掉后表现为"点了没反应、也没标记"）
+  {
+    const { RC, sigs } = await setup();
+    await lastPanel._msg({ type: 'hunkAccept', index: 0, sig: sigs[0] });
+    await wait(60);
+    execFileSync('git', ['checkout', '--', 'f.js'], { cwd: RC, encoding: 'utf8' }); // 外部把文件还原了
+    vscode._warns.length = 0;
+    vscode._output.lines.length = 0;
+    await lastPanel._msg({ type: 'hunkAccept', index: 1, sig: sigs[1] });
+    await wait(120);
+    check('D: diff 变空时给出「位置对不上，请刷新」提示，而不是静默失败',
+      vscode._warns.some((m) => /位置对不上|刷新后重试/.test(m)), JSON.stringify(vscode._warns));
+    check('D: 没有把内部异常抛成「命令执行失败」',
+      !vscode._output.lines.some((l) => /执行失败/.test(l)),
+      vscode._output.lines.slice(-4).join(' | '));
+    try { fs.rmSync(RC, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+}
+
 main()
   .then(async () => {
     try {
@@ -754,6 +1056,18 @@ main()
     } catch (e) {
       failures += 1;
       console.log('子目录场景异常:', e && e.stack ? e.stack : e);
+    }
+    try {
+      await mainSubdirBlock();
+    } catch (e) {
+      failures += 1;
+      console.log('子目录屏蔽场景异常:', e && e.stack ? e.stack : e);
+    }
+    try {
+      await mainAllHunksAutoMark();
+    } catch (e) {
+      failures += 1;
+      console.log('全块接受自动标记场景异常:', e && e.stack ? e.stack : e);
     }
     try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (e) { /* ignore */ }
     console.log(`\n${failures === 0 ? '全部通过 ✓' : `${failures} 项失败 ✗`}`);

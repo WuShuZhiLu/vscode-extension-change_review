@@ -5,8 +5,19 @@ const path = require('path');
 const { parseDiff, hunkSignature } = require('./diffParser');
 const { KIND_LABEL } = require('./treeProvider');
 // 面板底部显示当前扩展版本，便于在"功能异常"时一眼确认 webview 用的是不是新脚本
-let PANEL_VERSION = '0.4.12';
+let PANEL_VERSION = '0.4.16';
 try { PANEL_VERSION = require('../package.json').version; } catch (e) { /* ignore */ }
+
+// Tab 键插入的内容跟随 VSCode 编辑器设置（editor.insertSpaces / editor.tabSize）
+const EDITOR_INDENT = (() => {
+  try {
+    const c = vscode.workspace.getConfiguration('editor');
+    const spaces = c.get('insertSpaces', true);
+    const size = Number(c.get('tabSize', 4)) || 4;
+    return spaces ? ' '.repeat(size) : '\t';
+  } catch (e) { return '  '; } // 读不到就退化为两个空格
+})();
+const EDITOR_INDENT_LITERAL = JSON.stringify(EDITOR_INDENT);
 
 // ---------- 面板内文字 i18n（随 VSCode 显示语言自动切换，中英双语） ----------
 const PANEL_I18N = {
@@ -17,15 +28,29 @@ const PANEL_I18N = {
     refreshTitle: '重新扫描改动',
     tip: '行内也可直接编辑',
     acceptAll: '接受全部',
-    acceptAllTitle: '接受这些改动并标记为已审查（不动文件内容与 git 暂存区；暂存在「标记为已审查」时发生）',
+    acceptAllTitle: '接受这些改动并标记已审查（不动文件内容与 git 暂存区；暂存在「标记已审查」时发生）',
     rejectAll: '拒绝全部',
     hunkAccept: '接受此块',
-    hunkAcceptTitle: '接受这个改动块（标记为已接受，不动文件内容与暂存区；暂存在「标记为已审查」时发生）',
+    hunkAcceptTitle: '接受这个改动块（标记为已接受，不动文件内容与暂存区；暂存在「标记已审查」时发生）',
     hunkReject: '拒绝此块',
-    hunkRejectTitle: '记录拒绝这个改动块（不立即改文件；标记为已审查时统一执行还原，之前可反悔）',
+    hunkRejectTitle: '记录拒绝这个改动块（不立即改文件；标记已审查时统一执行还原，之前可反悔）',
     hunkRejectedBadge: '拒绝·待执行',
     hunkUnreject: '撤销拒绝',
     hunkUnrejectTitle: '取消这个块的拒绝决定，恢复为未决定状态',
+    blockFile: '屏蔽此文件',
+    blockFileTitle: '把这个文件写入 .crignore，之后不再出现在改动列表里',
+    blockFileDone: '已屏蔽 ✓',
+    ctxAccept: '接受全部改动',
+    ctxReject: '拒绝全部改动',
+    ctxMarkReviewed: '标记已审查',
+    ctxUnmarkReviewed: '取消审查',
+    btnMark: '标记已审查',
+    btnUnmark: '取消审查',
+    btnMarkTitle: '切换这个文件是否已审查',
+    ctxBlock: '屏蔽此文件',
+    ctxOpenDiff: '打开新旧对比',
+    ctxRefresh: '刷新列表',
+    ctxCopyPath: '复制文件路径',
     goto: '跳转',
     gotoTitle: '打开新旧对比视图，定位到该块（右侧可直接编辑）',
     noDiff: '没有可显示的文本差异',
@@ -52,6 +77,20 @@ const PANEL_I18N = {
     hunkRejectedBadge: 'Rejected · pending',
     hunkUnreject: 'Undo reject',
     hunkUnrejectTitle: 'Cancel the reject decision for this block (back to undecided)',
+    blockFile: 'Ignore this file',
+    blockFileTitle: 'Add this file to .crignore so it stops showing up in the change list',
+    blockFileDone: 'Ignored ✓',
+    ctxAccept: 'Accept all changes',
+    ctxReject: 'Reject all changes',
+    ctxMarkReviewed: 'Mark as reviewed',
+    ctxUnmarkReviewed: 'Unmark reviewed',
+    btnMark: 'Mark as reviewed',
+    btnUnmark: 'Unmark reviewed',
+    btnMarkTitle: 'Toggle whether this file is reviewed',
+    ctxBlock: 'Ignore this file (write to .crignore)',
+    ctxOpenDiff: 'Open old/new diff',
+    ctxRefresh: 'Refresh list',
+    ctxCopyPath: 'Copy file path',
     goto: 'Jump',
     gotoTitle: 'Open old/new diff view at this block (right side is editable)',
     noDiff: 'No text differences to show',
@@ -136,7 +175,7 @@ function renderHunk(hunk, index, opts) {
   }
   if (opts.canRevertHunk) {
     if (rejected) {
-      // 已记录拒绝：按钮变「撤销拒绝」，给用户反悔机会（还原发生在标记为已审查时）
+      // 已记录拒绝：按钮变「撤销拒绝」，给用户反悔机会（还原发生在标记已审查时）
       actions.push(`<button class="mini" data-cmd="hunkUnreject" data-index="${index}" data-sig="${sig}" title="${t('hunkUnrejectTitle')}">${t('hunkUnreject')}</button>`);
     } else {
       actions.push(`<button class="mini danger" data-cmd="hunkReject" data-index="${index}" data-sig="${sig}" title="${t('hunkRejectTitle')}">${t('hunkReject')}</button>`);
@@ -163,13 +202,6 @@ function buildHtml(ctx) {
   const file = ctx.file;
   const parsed = ctx.parsed;
   const reviewedSigs = ctx.reviewedSigs || {};
-  // 缩进设置（由宿主按 VSCode 的 editor.tabSize / editor.insertSpaces 下发），
-  // 缺失时退回 4 空格，保证离线预览 / 老调用方也能正常工作。
-  const indentSrc = ctx.indent || {};
-  const indentJson = JSON.stringify({
-    tabSize: Math.max(1, Number(indentSrc.tabSize) || 4),
-    insertSpaces: indentSrc.insertSpaces !== false
-  });
   // 文件已整体接受（已审查）后，块级接受/拒绝按钮隐藏——整体已经定了，再点块级是矛盾操作
   const fileAccepted = !!file.reviewed;
   const canRevertHunk = !fileAccepted && file.kind !== 'deleted' && file.kind !== 'conflict' && !parsed.binary;
@@ -237,7 +269,7 @@ function buildHtml(ctx) {
   .hunk { margin: 0 0 12px 0; border: 1px solid var(--vscode-panel-border, #333); border-radius: 6px; overflow: hidden; background: var(--vscode-editor-background); }
   .hunk.done .rows { opacity: .5; }
   /* 已记录拒绝（待执行）的块：整块红色氛围——头部红底、行变暗、红徽章、红色左条，
-     还原发生在「标记为已审查」时；一眼能和未处理的块区分开 */
+     还原发生在「标记已审查」时；一眼能和未处理的块区分开 */
   .hunk.rej { box-shadow: inset 3px 0 0 #f85149; }
   .hunk.rej .hunk-head { background: rgba(248, 81, 73, .14); }
   .hunk.rej .rows .row { opacity: .45; }
@@ -278,6 +310,19 @@ function buildHtml(ctx) {
   .empty { padding: 20px 12px; opacity: .7; }
   .state { margin-left: 8px; font-size: 11px; padding: 1px 6px; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
   .ver { text-align: right; font-size: 10px; opacity: .4; padding: 6px 14px 4px; user-select: none; }
+  /* 面板右键菜单：在 panel 内任意位置右键弹出（VSCode webview 不提供原生菜单） */
+  .ctxmenu {
+    position: fixed; z-index: 50; min-width: 180px; padding: 4px 0;
+    background: var(--vscode-menu-background, #252526);
+    color: var(--vscode-menu-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, #454545));
+    border-radius: 5px; box-shadow: 0 4px 12px rgba(0, 0, 0, .35);
+    font-size: 12px; user-select: none;
+  }
+  .ctxmenu[hidden] { display: none; }
+  .ctxmenu .mi { padding: 5px 14px; cursor: pointer; white-space: nowrap; }
+  .ctxmenu .mi:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); }
+  .ctxmenu .sep { height: 1px; margin: 4px 0; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border, #454545)); }
 </style>
 </head>
 <body>
@@ -296,15 +341,27 @@ function buildHtml(ctx) {
   <div class="toolbar">
     <button class="ok" data-cmd="accept" title="${escapeHtml(acceptTitle)}">${escapeHtml(acceptLabel)}</button>
     <button class="danger" data-cmd="reject" title="${escapeHtml(rejectTitle)}">${escapeHtml(rejectLabel)}</button>
-    <button class="${file.reviewed ? 'on' : ''}" data-cmd="mark" title="切换这个文件是否已审查">${file.reviewed ? '已审查 ✓（点击取消）' : '标记为已审查'}</button>
+    <button class="${file.reviewed ? 'on' : ''}" data-cmd="mark" title="${escapeHtml(t('btnMarkTitle'))}">${file.reviewed ? escapeHtml(t('btnUnmark')) : escapeHtml(t('btnMark'))}</button>
     <button class="secondary" data-cmd="next" title="${t('nextTitle')}">${t('next')}</button>
+    <button class="secondary" data-cmd="blockFile" title="${t('blockFileTitle')}">${t('blockFile')}</button>
     <button class="secondary" data-cmd="refresh" title="${t('refreshTitle')}">${t('refresh')}</button>
     <span class="tip">${t('tip')}</span>
   </div>
   <div class="diff">${hunks}</div>
   <div class="ver" id="panelVer">Change Review v${escapeHtml(PANEL_VERSION)} · lang=${escapeHtml(vscode.env.language || 'en')} · ui=${panelLang()}</div>
+  <div class="ctxmenu" id="ctxmenu" hidden>
+    <div class="mi" data-ctx="openDiff">${escapeHtml(t('ctxOpenDiff'))}</div>
+    <div class="sep"></div>
+    <div class="mi" data-ctx="accept">${escapeHtml(t('ctxAccept'))}</div>
+    <div class="mi" data-ctx="reject">${escapeHtml(t('ctxReject'))}</div>
+    <div class="mi" data-ctx="mark">${escapeHtml(file.reviewed ? t('ctxUnmarkReviewed') : t('ctxMarkReviewed'))}</div>
+    <div class="sep"></div>
+    <div class="mi" data-ctx="blockFile">${escapeHtml(t('ctxBlock'))}</div>
+    <div class="sep"></div>
+    <div class="mi" data-ctx="copyPath">${escapeHtml(t('ctxCopyPath'))}</div>
+    <div class="mi" data-ctx="refresh">${escapeHtml(t('ctxRefresh'))}</div>
+  </div>
 <script nonce="${n}">
-  window.__CR_INDENT__ = ${indentJson};
   // 整个脚本体用 try 包住：单点异常不至于让所有按钮/快捷键全部失效，
   // 异常同时 post 回扩展输出面板，便于排查"什么都没反应"的真实原因。
   // acquireVsCodeApi() 在同一个 webview 面板里只能调用一次！
@@ -320,43 +377,6 @@ function buildHtml(ctx) {
     throw new Error('acquireVsCodeApi failed and no cached reference');
   }
   try { // 整个脚本体包在 try 里：单点异常不至于让所有按钮/快捷键全部失效
-
-  // 缩进：跟随 VSCode 的 editor.tabSize / editor.insertSpaces（由宿主下发）
-  var INDENT = window.__CR_INDENT__ || { tabSize: 4, insertSpaces: true };
-  var TAB_SIZE = Math.max(1, parseInt(INDENT.tabSize, 10) || 4);
-  function spaces(n) { return new Array(Math.max(0, n) + 1).join(' '); }
-
-  // contenteditable 里可能被浏览器插进 <br>/<div>，字符偏移不等于 DOM 偏移，需要映射
-  function pointAt(el, offset) {
-    var pos = 0;
-    var walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    var nd;
-    while ((nd = walk.nextNode())) {
-      var len = nd.nodeValue.length;
-      if (pos + len >= offset) { return { node: nd, off: offset - pos }; }
-      pos += len;
-    }
-    return { node: el, off: el.childNodes.length };
-  }
-  function selectRange(el, from, to) {
-    var a = pointAt(el, from), b = pointAt(el, to);
-    var r = document.createRange();
-    try { r.setStart(a.node, a.off); r.setEnd(b.node, b.off); }
-    catch (err) { r.selectNodeContents(el); }
-    var s = getSelection();
-    s.removeAllRanges();
-    s.addRange(r);
-  }
-  // 光标在元素内的字符偏移（拿不到就返回 -1）
-  function caretAt(el) {
-    var s = getSelection();
-    if (!s || !s.rangeCount) { return -1; }
-    var pre = document.createRange();
-    pre.selectNodeContents(el);
-    try { pre.setEnd(s.getRangeAt(0).endContainer, s.getRangeAt(0).endOffset); }
-    catch (err) { return -1; }
-    return pre.toString().length;
-  }
 
   // 删行消息：focusLine 决定删完后焦点去哪。
   // 规则（确定性，不依赖删完重算的 diff 行号，避免行号漂移导致焦点乱跳）：
@@ -402,9 +422,195 @@ function buildHtml(ctx) {
     const el = e.target.closest && e.target.closest('.tx.ed');
     if (el) { commitEdit(el); }
   });
-  document.addEventListener('keydown', (e) => {
+  const INDENT = ${EDITOR_INDENT_LITERAL}; // 跟随 editor.insertSpaces / editor.tabSize
+
+  // ---- 光标位置判断：用于 Enter 插行方向（最左→上方插行，最右→下方插行，中间→拆行）
+  function nextEditable(el) {
+    const rows = Array.prototype.slice.call(document.querySelectorAll('.tx.ed[data-line]'));
+    const i = rows.indexOf(el);
+    return i >= 0 ? rows[i + 1] : null;
+  }
+  function caretInfo(el) {
+    try {
+      const s = getSelection();
+      if (!s.rangeCount) { return { atStart: false, atEnd: true, offset: String(el.textContent || '').length }; }
+      const r = s.getRangeAt(0);
+      const pre = document.createRange();
+      pre.selectNodeContents(el);
+      pre.setEnd(r.startContainer, r.startOffset);
+      const post = document.createRange();
+      post.selectNodeContents(el);
+      post.setStart(r.endContainer, r.endOffset);
+      return {
+        atStart: pre.toString().length === 0,
+        atEnd: post.toString().length === 0,
+        offset: pre.toString().length,
+        hasSel: !s.isCollapsed
+      };
+    } catch (e) { return { atStart: false, atEnd: true, offset: String(el.textContent || '').length, hasSel: false }; }
+  }
+
+  // ---- 剪贴板：优先 navigator.clipboard（webview 里 execCommand('copy'/'cut'/'paste') 常被拦）
+  function flatten(t) { return String(t == null ? '' : t).replace(/\\s*\\r?\\n\\s*/g, ' '); }
+  function writeClip(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => { try { document.execCommand('copy'); } catch (_) {} });
+        return;
+      }
+    } catch (e) { /* 落到 execCommand */ }
+    try { document.execCommand('copy'); } catch (_) {}
+  }
+  function selText(el) {
+    try {
+      const s = getSelection();
+      if (s && s.toString()) { return s.toString(); }
+    } catch (e) { /* ignore */ }
+    return el.textContent || '';
+  }
+  function insertText(el, text) {
+    try { document.execCommand('insertText', false, text); }
+    catch (e) { el.textContent = (el.textContent || '') + text; }
+    if (!el.dataset.orig) { el.dataset.orig = ''; }
+    lastText.set(String(el.dataset.line), el.textContent);
+  }
+  function copySel(el) {
+    const txt = selText(el);
+    if (!txt) { return; }
+    writeClip(txt);
+  }
+  function cutSel(el) {
+    const txt = selText(el);
+    writeClip(txt);
+    try {
+      const s = getSelection();
+      if (s && !s.isCollapsed) {
+        s.getRangeAt(0).deleteContents();
+      } else {
+        el.textContent = '';
+      }
+    } catch (e) { el.textContent = ''; }
+    el.dataset.orig = el.textContent;
+    lastText.set(String(el.dataset.line), el.textContent);
+    vscode.postMessage({ type: 'editLine', line: Number(el.dataset.line), text: el.textContent, keepFocus: true });
+  }
+  function pasteInto(el) {
+    const doInsert = (t) => { const s = flatten(t); if (s) { insertText(el, s); } };
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(doInsert).catch(() => { try { document.execCommand('paste'); } catch (_) {} });
+        return;
+      }
+    } catch (e) { /* 落到 execCommand */ }
+    try { document.execCommand('paste'); } catch (_) {}
+  }
+
+  // ---- 每行一个简易撤销栈：跨越面板重渲染也能 Ctrl+Z / Ctrl+Shift+Z
+  const undoMap = new Map();
+  const redoMap = new Map();
+  let lastText = new Map();
+  document.addEventListener('input', (e) => {
     const el = e.target.closest && e.target.closest('.tx.ed');
     if (!el) { return; }
+    const line = el.dataset.line;
+    const prev = lastText.has(line) ? lastText.get(line) : (el.dataset.orig || '');
+    if (prev !== el.textContent) {
+      const st = undoMap.get(line) || [];
+      st.push(prev);
+      if (st.length > 50) { st.shift(); }
+      undoMap.set(line, st);
+      redoMap.set(line, []);
+      lastText.set(line, el.textContent);
+    }
+  });
+  function writeLine(el, text, extra) {
+    const line = Number(el.dataset.line);
+    el.textContent = text;
+    el.dataset.orig = text;
+    lastText.set(String(line), text);
+    vscode.postMessage(Object.assign({ type: 'editLine', line: line, text: text, keepFocus: true }, extra || {}));
+  }
+  function undo(el) {
+    const line = el.dataset.line;
+    const st = undoMap.get(line) || [];
+    if (!st.length) { return; }
+    const v = st.pop();
+    const rd = redoMap.get(line) || [];
+    rd.push(el.textContent);
+    redoMap.set(line, rd);
+    writeLine(el, v);
+  }
+  function redo(el) {
+    const line = el.dataset.line;
+    const rd = redoMap.get(line) || [];
+    if (!rd.length) { return; }
+    const v = rd.pop();
+    const st = undoMap.get(line) || [];
+    st.push(el.textContent);
+    undoMap.set(line, st);
+    writeLine(el, v);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    const el = e.target.closest && e.target.closest('.tx.ed');
+    const key = (e.key || '').toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    // Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+A 在面板任意位置都接管（VSCode 会先截获这些组合键）
+    if (mod && key === 's') {
+      e.preventDefault();
+      const target = el || document.activeElement && document.activeElement.closest && document.activeElement.closest('.tx.ed');
+      if (target) {
+        const text = target.textContent;
+        target.dataset.orig = text;
+        lastText.set(String(target.dataset.line), text);
+        vscode.postMessage({ type: 'editLine', line: Number(target.dataset.line), text: text, keepFocus: true });
+      } else {
+        vscode.postMessage({ type: 'saveNow' });
+      }
+      return;
+    }
+    if (!el) { return; }
+    if (mod && (key === 'z' || key === 'y')) {
+      // Ctrl+Z 撤销 / Ctrl+Y 或 Ctrl+Shift+Z 重做（VSCode 会截获，必须 prevent + stop）
+      e.preventDefault();
+      try { e.stopPropagation(); } catch (err) { /* ignore */ }
+      if (key === 'y' || e.shiftKey) {
+        const rd = redoMap.get(el.dataset.line) || [];
+        if (!rd.length) { vscode.postMessage({ type: 'redo' }); return; } // 行内栈空 → 走文件级重做（新增/删除/合并行也能恢复）
+        redo(el);
+      } else {
+        const st = undoMap.get(el.dataset.line) || [];
+        if (!st.length) { vscode.postMessage({ type: 'undo' }); return; } // 行内栈空 → 走文件级撤销
+        undo(el);
+      }
+      return;
+    }
+    if (mod && key === 'a') {
+      // Ctrl+A：只选中当前这一行的文本，不选中整个面板
+      e.preventDefault();
+      try {
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        const s = getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+      } catch (err) { /* ignore */ }
+      return;
+    }
+    if (mod && (key === 'c' || key === 'x')) {
+      // Ctrl+C / Ctrl+X：自己走剪贴板 API（VSCode 会截获原生复制/剪切，光靠 execCommand 常常没反应）
+      e.preventDefault();
+      try { e.stopPropagation(); } catch (err) { /* ignore */ }
+      if (key === 'c') { copySel(el); } else { cutSel(el); }
+      return;
+    }
+    if (mod && key === 'v') {
+      // Ctrl+V：主动读剪贴板再插入，不依赖浏览器默认粘贴（webview 里经常不触发）
+      e.preventDefault();
+      try { e.stopPropagation(); } catch (err) { /* ignore */ }
+      pasteInto(el);
+      return;
+    }
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       // 编辑某一行时，↑/↓ 在可编辑行之间切换（失焦会先把当前行写回）
       e.preventDefault();
@@ -425,56 +631,60 @@ function buildHtml(ctx) {
       return;
     }
     if (e.key === 'Tab') {
-      // Tab / Shift+Tab = 缩进 / 反缩进，跟随 VSCode 的 editor.tabSize / editor.insertSpaces。
-      // 不再硬塞一个真制表符：insertSpaces=true 时要用空格，否则浏览器按 8 列渲染 \\t，
-      // 看起来就是"我设的是 4，它给我 8"。
+      // Tab = 插入一个缩进单位（跟随 editor.insertSpaces / editor.tabSize），不是跳焦点
       e.preventDefault();
-      var txt = el.textContent || '';
-      var lm = txt.match(/^([ \\t]*)/);
-      var lead = lm ? lm[1].length : 0;
-      var cur = caretAt(el);
-      if (cur < 0) { cur = 0; }
-      if (e.shiftKey) {
-        // 反缩进：从行首缩进区回退到上一个 tab stop（只碰空白）
-        if (!lead) { return; }
-        var cut = lead % TAB_SIZE || TAB_SIZE;
-        if (cut > lead) { cut = lead; }
-        selectRange(el, lead - cut, lead);
-        document.execCommand('delete');
-        return;
-      }
-      if (cur <= lead) {
-        // 光标在行首缩进区：补到下一个 tab stop（列对齐，而不是简单加一个单位）
-        selectRange(el, lead, lead);
-        document.execCommand('insertText', false, INDENT.insertSpaces ? spaces(TAB_SIZE - (lead % TAB_SIZE)) : '\\t');
-        return;
-      }
-      // 行中间：插一个缩进单位
-      document.execCommand('insertText', false, INDENT.insertSpaces ? spaces(TAB_SIZE) : '\\t');
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
-      // Ctrl+S = 立即保存这一行并刷新 diff（等价于手动“写回并重算”）
-      e.preventDefault();
-      const text = el.textContent;
-      if (text === el.dataset.orig) { return; } // 没改动就不用重渲染
-      el.dataset.orig = text;
-      vscode.postMessage({ type: 'editLine', line: Number(el.dataset.line), text: text, keepFocus: true });
+      document.execCommand('insertText', false, INDENT);
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
-      // Enter = 在这行下面插入一行：先把当前行写回（连着 insertBelow 一次发送），重渲染后焦点落到新行
+      // Enter 的方向按光标位置定：
+      //   光标在最左 → 在这行上面插空行（焦点留在本行，内容被顶下去）
+      //   光标在最右 → 在这行下面插空行（焦点落到新行，和以前一致）
+      //   光标在中间 → 像编辑器一样拆行（光标前留在本行，光标后成为下一行）
       e.preventDefault();
-      const text = el.textContent;
-      el.dataset.orig = text; // 让随后的 focusout 误判不了重复提交
-      vscode.postMessage({ type: 'editLine', line: Number(el.dataset.line), text: text, insertBelow: true });
+      const info = caretInfo(el);
+      const full = el.textContent || '';
+      el.dataset.orig = full; // 让随后的 focusout 误判不了重复提交
+      lastText.set(String(el.dataset.line), full);
+      if (!info.hasSel && info.atStart) {
+        vscode.postMessage({ type: 'insertAbove', line: Number(el.dataset.line) });
+      } else if (info.atEnd) {
+        vscode.postMessage({ type: 'editLine', line: Number(el.dataset.line), text: full, insertBelow: true });
+      } else {
+        const before = full.slice(0, info.offset);
+        const after = full.slice(info.offset);
+        vscode.postMessage({ type: 'editLine', line: Number(el.dataset.line), text: before, insertBelow: true, tail: after });
+      }
       return;
     }
+    // 合并行：Backspace 在行首 → 并到上一行；Delete 在行尾 → 把下一行并上来
+    // 合并行：只在「没有选区」且光标贴边时才合并。
+    // 有选区时（比如整行选中后按 Backspace）必须走默认删除行为，否则会把内容并到上一行。
+    if ((e.key === 'Backspace' || e.key === 'Delete') && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      const info = caretInfo(el);
+      const cur = Number(el.dataset.line);
+      const mergeUp = e.key === 'Backspace' && !info.hasSel && info.atStart && cur > 1;
+      const mergeDown = e.key === 'Delete' && !info.hasSel && info.atEnd;
+      if (mergeUp || mergeDown) {
+        if (mergeDown && !nextEditable(el)) { /* 没有下一行可并，交给默认行为 */ }
+        else {
+          e.preventDefault();
+          el.dataset.orig = el.textContent;
+          lastText.set(String(el.dataset.line), el.textContent);
+          el.blur();
+          vscode.postMessage({ type: 'mergeLine', line: cur, dir: mergeUp ? 'up' : 'down', text: el.textContent });
+          return;
+        }
+      }
+    }
     const isDelKey = e.key === 'Backspace' || e.key === 'Delete';
+    // 删行：空行上按 Backspace/Delete、Ctrl+Del、Ctrl+Shift+K（编辑器同款删行键）
+    const ctrlShiftK = e.key === 'K' && e.shiftKey && (e.ctrlKey || e.metaKey);
     const rowDel = isDelKey && (el.textContent === '' && !e.ctrlKey && !e.metaKey)
-      || (e.key === 'Delete' && (e.ctrlKey || e.metaKey)); // 空行上按 Backspace/Delete，或 Ctrl+Del
+      || (e.key === 'Delete' && (e.ctrlKey || e.metaKey))
+      || ctrlShiftK; // 内容行也能整行删（Ctrl+Shift+K）
     if (rowDel) {
-      // 删除整行（bug 12）。空行删完焦点回上一行，内容行（Ctrl+Del）焦点留在原位
+      // 删除整行（bug 12）。空行删完焦点回上一行，内容行（Ctrl+Del / Ctrl+Shift+K）焦点留在原位
       e.preventDefault();
       el.dataset.orig = el.textContent; // 防止 blur 时把内容当编辑提交
       el.blur();
@@ -492,6 +702,42 @@ function buildHtml(ctx) {
     const t = ((e.clipboardData || window.clipboardData).getData('text') || '');
     document.execCommand('insertText', false, t.replace(/\\s*\\r?\\n\\s*/g, ' '));
   });
+
+  // ---- 右键菜单：在面板任意位置右键弹出（webview 里 VSCode 不给原生菜单）
+  const ctxEl = document.getElementById('ctxmenu');
+  function hideCtx() { if (ctxEl) { ctxEl.hidden = true; } }
+  function showCtx(x, y) {
+    if (!ctxEl) { return; }
+    ctxEl.hidden = false;
+    // 先显示再量尺寸，避免靠右/靠下被裁切
+    const rect = ctxEl.getBoundingClientRect();
+    const px = Math.min(x, window.innerWidth - rect.width - 4);
+    const py = Math.min(y, window.innerHeight - rect.height - 4);
+    ctxEl.style.left = Math.max(4, px) + 'px';
+    ctxEl.style.top = Math.max(4, py) + 'px';
+  }
+  document.addEventListener('contextmenu', (e) => {
+    // 行内编辑时保留浏览器默认菜单（复制/粘贴），其余位置弹出我们的菜单
+    if (e.target.closest && e.target.closest('.tx.ed')) { return; }
+    e.preventDefault();
+    showCtx(e.clientX, e.clientY);
+  });
+  if (ctxEl) {
+    ctxEl.addEventListener('click', (e) => {
+      const mi = e.target.closest('.mi');
+      if (!mi) { return; }
+      const cmd = mi.dataset.ctx;
+      hideCtx();
+      if (cmd === 'copyPath') {
+        vscode.postMessage({ type: 'copyText', text: ${JSON.stringify(file.absPath)} });
+        return;
+      }
+      vscode.postMessage({ type: 'ctxCmd', cmd: cmd });
+    });
+  }
+  document.addEventListener('click', (e) => { if (!e.target.closest || !e.target.closest('.ctxmenu')) { hideCtx(); } });
+  document.addEventListener('scroll', hideCtx, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideCtx(); } });
 
   // 插入行后重渲染：把焦点放到新行（光标移到行尾）
   const af = document.querySelector('[data-autofocus]');
@@ -555,11 +801,18 @@ class ReviewPanel {
         case 'edit': await this.handlers.openInEditor(this.entry, msg.line); break;
         case 'next': await this.handlers.next(this.entry); break;
         case 'refresh': await this.handlers.refresh(); break;
+        case 'blockFile': await this.handlers.blockFile(this.entry); break;
+        case 'ctxCmd': await this.handlers.ctxCmd(this.entry, msg.cmd); break;
         case 'hunkAccept': await this.handlers.acceptHunk(this.entry, msg.index, msg.sig); break;
         case 'hunkReject': await this.handlers.rejectHunk(this.entry, msg.index, msg.sig); break;
         case 'hunkUnreject': await this.handlers.unrejectHunk(this.entry, msg.index, msg.sig); break;
-        case 'editLine': await this.handlers.editLine(this.entry, msg.line, msg.text, msg.insertBelow, msg.keepFocus ? msg.line : undefined); break;
+        case 'editLine': await this.handlers.editLine(this.entry, msg.line, msg.text, msg.insertBelow, msg.keepFocus ? msg.line : undefined, { tail: msg.tail }); break;
         case 'insertLine': await this.handlers.insertLine(this.entry, msg.line); break;
+        case 'insertAbove': await this.handlers.insertAbove(this.entry, msg.line); break;
+        case 'saveNow': await this.handlers.saveNow(this.entry); break;
+        case 'mergeLine': await this.handlers.mergeLine(this.entry, msg.line, msg.dir, msg.text); break;
+        case 'undo': await this.handlers.undoFile(this.entry); break;
+        case 'redo': await this.handlers.redoFile(this.entry); break;
         case 'deleteLine': await this.handlers.deleteLine(this.entry, msg.line, msg.focusLine); break;
         case 'clusterRestore': await this.handlers.clusterRestore(this.entry, msg.hunk, msg.clus); break;
         case 'deleteLines': await this.handlers.deleteLines(this.entry, msg.lines); break;
@@ -610,15 +863,6 @@ class ReviewPanel {
       ? '放弃改动，将文件还原到上次提交 (HEAD)'
       : (src.provider.id === 'svn' ? '放弃改动，将文件还原到 SVN BASE' : '放弃改动，将文件还原到对比基准');
 
-    // 缩进跟随 VSCode 设置（editor.tabSize / editor.insertSpaces）。
-    // 之前面板里 Tab 硬塞一个真 \t：insertSpaces=true 时用错了字符，
-    // 而 webview 渲染 \t 默认按 8 列走 → 表现为"我设的是 4，它给我 8"。
-    const editorCfg = vscode.workspace.getConfiguration('editor');
-    const indent = {
-      tabSize: Math.max(1, Number(editorCfg.get('tabSize', 4)) || 4),
-      insertSpaces: editorCfg.get('insertSpaces', true) !== false
-    };
-
     panel.webview.html = buildHtml({
       file: entry.file,
       parsed,
@@ -626,7 +870,6 @@ class ReviewPanel {
       repoName: src.name,
       baseLabel: src.baseLabel,
       rejectTitle,
-      indent,
       reviewedSigs: this.handlers.getReviewedHunks(src.root, entry.file.relPath) || {},
       rejectedSigs: this.handlers.getRejectedHunks ? (this.handlers.getRejectedHunks(src.root, entry.file.relPath) || {}) : {},
       cspSource: panel.webview.cspSource,

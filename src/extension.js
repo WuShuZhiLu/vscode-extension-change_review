@@ -38,6 +38,7 @@ function buildProvidersKey(folders, opt) {
     forceVcs: opt.forceVcs,
     depth: opt.searchDepth,
     exclude: opt.exclude || [],
+    excludeSets: (opt.excludeSets || []).map((s) => ({ b: platform.normalizeForCompare(s.base), r: s.rules })),
     allow: !!opt.allowSnapshot,
     storage: opt.storageDir,
     snapExcl: (opt.snapshotOptions && opt.snapshotOptions.exclude) || null,
@@ -80,9 +81,8 @@ function cfg() {
  * 读取某个工作区目录下的 .crignore（gitignore 风格：每行一个 glob，# 注释，空行忽略）。
  * 这是「配置排除规则」命令实际编辑的文件，也是项目级的排除规则来源（不写进插件设置）。
  */
-function readProjectIgnore(folderFsPath) {
-  const igPath = path.join(folderFsPath, '.crignore');
-  if (!fs.existsSync(igPath)) { return []; }
+function readIgnoreFile(igPath) {
+  if (!fs.existsSync(igPath)) { return null; }
   try {
     const lines = fs.readFileSync(igPath, 'utf8').split(/\r?\n/);
     const globs = [];
@@ -93,36 +93,79 @@ function readProjectIgnore(folderFsPath) {
     }
     return globs;
   } catch (e) {
-    log(`读取 .crignore 失败 ${igPath}: ${e.message}`);
+    log(`读取 ${path.basename(igPath)} 失败 ${igPath}: ${e.message}`);
     return [];
   }
 }
 
-/** 汇总所有工作区目录的 .crignore 规则 */
-function projectIgnoreGlobs() {
+/**
+ * 读取某个工作区目录下的排除规则（gitignore 风格）：
+ *   有 .crignore → 用它（svn / 未托管工程主要靠它）；
+ *   没有 .crignore → 默认回退到该目录的 .gitignore 规则（git 工程不需要额外配 .crignore）。
+ */
+function readProjectIgnore(folderFsPath) {
+  const crig = readIgnoreFile(path.join(folderFsPath, '.crignore'));
+  if (crig !== null) { return crig; }
+  const gi = readIgnoreFile(path.join(folderFsPath, '.gitignore'));
+  return gi === null ? [] : gi;
+}
+
+/**
+ * 汇总所有工作区目录里的项目忽略规则，**带上「规则文件所在目录」**。
+ *
+ * 这是与 .gitignore 对齐的关键：git 里某个 .gitignore 的规则，匹配的是「相对该 .gitignore
+ * 所在目录」的路径，而不是相对仓库根。我们如果把规则拍平成一个列表、统一按「相对来源根」
+ * 去匹配，当来源根 ≠ 规则文件所在目录时（比如打开的是仓库子目录），规则就会因前缀对不上而失效。
+ * 所以这里保留 base，交给 provider 按 base 锚定匹配。
+ */
+function projectIgnoreSets() {
   const folders = vscode.workspace.workspaceFolders || [];
-  const all = [];
+  const sets = [];
   for (const f of folders) {
-    all.push(...readProjectIgnore(f.uri.fsPath));
+    const rules = readProjectIgnore(f.uri.fsPath);
+    if (rules.length) { sets.push({ base: f.uri.fsPath, rules }); }
   }
-  return all;
+  return sets;
 }
 
 // 默认内容：一行说明即可，中英文对照；规则语法同 .gitignore
 const IGNORE_TEMPLATE = '# 排除规则，语法同 .gitignore / Exclude rules, same syntax as .gitignore\n';
 
+/** 把一条 glob 规则写入某个目录的 .crignore（不存在则创建；已存在则跳过）。返回 'added' | 'exists' */
+function appendIgnoreRule(folderFsPath, glob) {
+  const igPath = path.join(folderFsPath, '.crignore');
+  const existing = readIgnoreFile(igPath) || [];
+  if (existing.some((g) => g === glob)) { return 'exists'; }
+  let body = IGNORE_TEMPLATE;
+  if (fs.existsSync(igPath)) {
+    const raw = fs.readFileSync(igPath, 'utf8');
+    body = raw.length && !raw.endsWith('\n') ? `${raw}\n` : raw;
+  }
+  fs.writeFileSync(igPath, `${body}${glob}\n`, 'utf8');
+  return 'added';
+}
+
+/** 计算一个文件相对于工作区目录的 posix 相对路径；不在工作区内则返回 null */
+function relToFolder(folderFsPath, absPath) {
+  const rel = path.relative(folderFsPath, absPath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { return null; }
+  return rel.split(path.sep).join('/');
+}
+
 function vcsOptions() {
-  // 排除规则 = 手动设置 changeReview.exclude + 项目 .crignore 文件 + 规则文件自身（始终隐藏）
+  // 设置项里的排除规则：按「相对来源根」匹配（README 语义），外加规则文件自身始终隐藏
   const exclude = [
     ...cfg().get('exclude', []),
-    ...projectIgnoreGlobs(),
     '.crignore',
     '**/.crignore'
   ].filter((x) => typeof x === 'string' && x.length > 0);
+  // 项目 .crignore / .gitignore：按「各自规则文件所在目录」锚定（与 .gitignore 语义一致）
+  const excludeSets = projectIgnoreSets();
   return {
     forceVcs: cfg().get('forceVcs', 'auto'),
     searchDepth: cfg().get('vcsSearchDepth', 5),
     exclude,
+    excludeSets,
     storageDir: storageDir || path.join(os.tmpdir(), 'change-review'),
     allowSnapshot: true,
     snapshotOptions: {
@@ -198,7 +241,7 @@ function resolveArg(arg, silent = false) {
 
 /**
  * 标记/取消「已审查」。
- * opts.stageGit=true 时（勾选/取消勾选这种显式的"标记为已审查"动作）会顺带操作 git 暂存区：
+ * opts.stageGit=true 时（勾选/取消勾选这种显式的"标记已审查"动作）会顺带操作 git 暂存区：
  *   勾选 → git add（加入暂存区）；取消 → git reset（撤出暂存区）。
  * 接受(全部/此块) 与「全部标记」走的都是普通标记（stageGit 不传），
  * 一律不碰暂存区——用户语义：接受/拒绝只对文件层面判断，暂存只在显式打勾时发生。
@@ -210,7 +253,7 @@ async function setReviewed(entry, value, opts) {
   const stageGit = !!(opts && opts.stageGit) && provider && provider.id === 'git';
   let appliedRejects = 0;
   if (value) {
-    // 标记为已审查前，先执行该文件所有待执行的拒绝块；失败则不标记，保持状态一致
+    // 标记已审查前，先执行该文件所有待执行的拒绝块；失败则不标记，保持状态一致
     const r = await applyPendingRejects(entry);
     if (r === -1) { return; }
     appliedRejects = r;
@@ -243,8 +286,23 @@ async function setReviewed(entry, value, opts) {
   entry.file.reviewed = value;
 }
 
-/** 用文件当前实际状态重算指纹（拒绝块还原后内容已变，原 hash 失效） */
+/**
+ * 用文件当前实际状态重算指纹（拒绝块还原后内容已变，原 hash 失效）。
+ * 必须与「刷新时算出的 hash」口径完全一致，否则「标记已审查」会被下一次刷新判成未审查 →
+ * 表现为「明明全打钩了，却没标记已审查」。
+ * 所以优先用 provider 自己复查出来的 hash（refreshSingleEntry 用的就是它），
+ * 拿不到再退回按解析出的块统计。
+ */
 async function freshFileHash(entry) {
+  const p = entry.source && entry.source.provider;
+  if (p && typeof p.recheckFile === 'function') {
+    try {
+      const hit = await p.recheckFile(entry.file);
+      if (hit && typeof hit.hash === 'string' && hit.hash) { return hit.hash; }
+    } catch (e) {
+      log(`复查文件拿权威指纹失败（${entry.file.relPath}）：${e.message}`);
+    }
+  }
   try {
     const t = await entry.source.provider.getDiff(entry.file, cfg().get('contextLines', 3));
     const parsed = parseDiff(t)[0];
@@ -379,6 +437,9 @@ async function doRefresh(force) {
     provider.setModel(model);
     updateBadges();
     if (pendingReveal) { retryPendingReveal().catch(() => {}); } // #4：刷新后补一次高亮跟随
+    // 兜底对账：块都决定了却没标记的文件在这里补上（自动刷新会换掉 model 对象，
+    // 只靠点击那一刻的检查会漏 → 用户看到"全打钩了但没标记已审查"）
+    await reconcileDecidedFiles();
     if (panel && panel.entry) { await refreshPanelIfChanged(); }
   } catch (e) {
     log(`刷新异常：${e.stack || e.message}`);
@@ -550,8 +611,10 @@ async function openFileForEdit(entry, line) {
  * 这是用户要的「编辑 = 在对比块里就地改、同步到内容」，而不是跳到文件里改。
  * insertBelow=true 时（按 Enter / 点「+行」）顺便在该行下面插一个空行，并把焦点落到新行。
  */
-async function editLineInFile(entry, lineNo, text, insertBelow, focusLine) {
+async function editLineInFile(entry, lineNo, text, insertBelow, focusLine, opts) {
+  pushSnapshot(entry);
   const abs = entry.file.absPath;
+  const tail = opts && typeof opts.tail === 'string' ? opts.tail : null; // Enter 在行中间：光标后半截成为下一行
   if (!abs || !fs.existsSync(abs)) {
     vscode.window.showWarningMessage('该文件当前不存在（可能已被删除），无法写入修改。');
     return;
@@ -567,18 +630,18 @@ async function editLineInFile(entry, lineNo, text, insertBelow, focusLine) {
     }
     let changed = false;
     if (lines[idx] !== text) { lines[idx] = text; changed = true; }
-    if (insertBelow) { lines.splice(idx + 1, 0, ''); }
-    if (!changed && !insertBelow) { return; }
-    fs.writeFileSync(abs, lines.join('\n'), 'utf8');
-    log(`[审查面板] 已写回 ${entry.file.relPath}:${lineNo}${insertBelow ? ' 并插入新行' : ''}`);
-    vscode.window.setStatusBarMessage(`已写回 ${entry.file.relPath}:${lineNo}`, 2000);
-    await doRefresh(false);
-    if (panel && panel.entry && sameEntry(panel.entry, entry)) {
-      // Ctrl+S / Enter 插入行 都会把光标焦点带回去（避免保存后焦点丢到页面顶上）
-      const targetFocus = focusLine ? Number(focusLine)
-        : (insertBelow ? idx + 2 : undefined);
-      await panel.reload(targetFocus ? { focusLine: targetFocus } : undefined);
+    if (insertBelow) { lines.splice(idx + 1, 0, tail); }
+    if (!changed && !insertBelow) {
+      // Ctrl+S 但内容没变：给个明确反馈，别让人以为没生效
+      vscode.window.setStatusBarMessage(`该行内容已是最新，无需保存（${entry.file.relPath}:${lineNo}）`, 2000);
+      return;
     }
+    fs.writeFileSync(abs, lines.join('\n'), 'utf8');
+    log(`[审查面板] 已写回 ${entry.file.relPath}:${lineNo}${insertBelow ? (tail !== null ? ' 并拆行' : ' 并插入新行') : ''}`);
+    vscode.window.setStatusBarMessage(`已写回 ${entry.file.relPath}:${lineNo}`, 2000);
+    // 只复查这一个文件：全量 doRefresh 会触发整仓 git 扫描，行内编辑（尤其 Enter 拆行）会明显卡顿
+    const targetFocus = focusLine ? Number(focusLine) : (insertBelow ? idx + 2 : undefined);
+    await afterLineOp(entry, { focusLine: targetFocus });
   } catch (e) {
     const msg = `写回第 ${lineNo} 行失败：${e.message}`;
     log(msg);
@@ -586,8 +649,32 @@ async function editLineInFile(entry, lineNo, text, insertBelow, focusLine) {
   }
 }
 
+/** 在第 lineNo 行上面插入一个空行（Enter 打在行首时；焦点回到原来的内容行，内容被顶下来） */
+async function insertLineAboveInFile(entry, lineNo) {
+  pushSnapshot(entry);
+  const abs = entry.file.absPath;
+  if (!abs || !fs.existsSync(abs)) { return; }
+  try {
+    const lines = fs.readFileSync(abs, 'utf8').split('\n');
+    const idx = Number(lineNo) - 1;
+    if (!(idx >= 0 && idx <= lines.length)) {
+      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未插入。`);
+      return;
+    }
+    lines.splice(idx, 0, '');
+    fs.writeFileSync(abs, lines.join('\n'), 'utf8');
+    log(`[审查面板] 已在 ${entry.file.relPath}:${lineNo} 上方插入空行`);
+    await afterLineOp(entry, { focusLine: Number(lineNo) + 1 }); // 原内容行被顶到 lineNo+1
+  } catch (e) {
+    const msg = `插入行失败：${e.message}`;
+    log(msg);
+    showErr(msg);
+  }
+}
+
 /** 在第 lineNo 行下面插入一个空行（对比块里的「+行」） */
 async function insertLineInFile(entry, lineNo) {
+  pushSnapshot(entry);
   const abs = entry.file.absPath;
   if (!abs || !fs.existsSync(abs)) { return; }
   try {
@@ -600,10 +687,7 @@ async function insertLineInFile(entry, lineNo) {
     lines.splice(idx, 0, '');
     fs.writeFileSync(abs, lines.join('\n'), 'utf8');
     log(`[审查面板] 已在 ${entry.file.relPath}:${lineNo} 后插入空行`);
-    await doRefresh(false);
-    if (panel && panel.entry && sameEntry(panel.entry, entry)) {
-      await panel.reload({ focusLine: idx + 1 });
-    }
+    await afterLineOp(entry, { focusLine: idx + 1 });
   } catch (e) {
     log(`插入行失败: ${e.message}`);
     vscode.window.showErrorMessage(`插入行失败：${e.message}`);
@@ -613,6 +697,7 @@ async function insertLineInFile(entry, lineNo) {
 /** 删除第 lineNo 行（对比块里的「删行」） */
 /** 删除第 lineNo 行（对比块里的「删行」/ 键盘删行）。focusLine 为删完后要聚焦的行号（由面板在删前从 DOM 邻居算出） */
 async function deleteLineInFile(entry, lineNo, focusLine) {
+  pushSnapshot(entry);
   const abs = entry.file.absPath;
   if (!abs || !fs.existsSync(abs)) { return; }
   try {
@@ -626,14 +711,9 @@ async function deleteLineInFile(entry, lineNo, focusLine) {
     fs.writeFileSync(abs, lines.join('\n'), 'utf8');
     log(`[审查面板] 已删除 ${entry.file.relPath}:${lineNo}`);
     vscode.window.setStatusBarMessage(`已删除 ${entry.file.relPath}:${lineNo}`, 2000);
-    await doRefresh(false);
-    if (panel && panel.entry && sameEntry(panel.entry, entry)) {
-      // 焦点落到「被删行上面的那一行」：diff 重算后行号会漂移，
-      // 不能用删掉的行号硬指（可能指到补位行/对不上导致焦点乱跳）。
-      // 删之前面板已把目标行号算好带过来；带不过来才退而取 lineNo-1。
-      const target = Number(focusLine) > 0 ? Number(focusLine) : Math.max(1, Number(lineNo) - 1);
-      await panel.reload({ focusLine: target });
-    }
+    // 焦点落到「被删行上面的那一行」：diff 重算后行号会漂移，不能用删掉的行号硬指。
+    const target = Number(focusLine) > 0 ? Number(focusLine) : Math.max(1, Number(lineNo) - 1);
+    await afterLineOp(entry, { focusLine: target });
   } catch (e) {
     log(`删除行失败: ${e.message}`);
     vscode.window.showErrorMessage(`删除行失败：${e.message}`);
@@ -660,6 +740,7 @@ async function clusterRestoreInFile(entry, hunkIndex, clusterIndex) {
 
 /** 批量删除多个真实文件行（lines 为新文件 1 基行号） */
 async function deleteLinesInFile(entry, lines) {
+  pushSnapshot(entry);
   const abs = entry.file.absPath;
   const arr = Array.isArray(lines) ? lines.map((n) => Number(n)).filter((n) => n > 0) : [];
   if (!abs || !fs.existsSync(abs) || !arr.length) { return; }
@@ -684,6 +765,7 @@ async function deleteLinesInFile(entry, lines) {
 
 /** 在第 line 行下面插入多行（text 按换行拆开；粘贴恢复删除内容也用这里） */
 async function insertLinesBelowInFile(entry, line, text) {
+  pushSnapshot(entry);
   const abs = entry.file.absPath;
   if (!abs || !fs.existsSync(abs)) { return; }
   const insert = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
@@ -707,6 +789,101 @@ async function insertLinesBelowInFile(entry, line, text) {
 
 /** 记录"应当高亮"的文件；若此刻树不可见/没渲染完，等可见或下次刷新后再补一次 reveal */
 let pendingReveal = null;
+
+// --------------------------------------------- 文件级撤销 / 重做（覆盖行内编辑、增删行、合并行）
+const fileUndoStack = [];
+const fileRedoStack = [];
+
+/** 在任何写文件操作之前调用：把「改动前的文件内容」压入撤销栈 */
+function pushSnapshot(entry) {
+  try {
+    const abs = entry && entry.file && entry.file.absPath;
+    if (!abs || !fs.existsSync(abs)) { return; }
+    const content = fs.readFileSync(abs, 'utf8');
+    const top = fileUndoStack[fileUndoStack.length - 1];
+    if (top && top.abs === abs && top.content === content) { return; } // 与上一步相同，不重复记
+    fileUndoStack.push({ abs, root: entry.source.root, relPath: entry.file.relPath, content });
+    if (fileUndoStack.length > 80) { fileUndoStack.shift(); }
+    fileRedoStack.length = 0; // 有新操作 → 重做栈作废
+  } catch (e) { /* 记快照失败不影响主操作 */ }
+}
+
+async function undoFileOp(entry) { await restoreFrom(entry, fileUndoStack, fileRedoStack, '撤销'); }
+async function redoFileOp(entry) { await restoreFrom(entry, fileRedoStack, fileUndoStack, '重做'); }
+
+async function restoreFrom(entry, from, to, word) {
+  if (!entry) { return; }
+  const abs = entry.file.absPath;
+  let i = -1;
+  for (let k = from.length - 1; k >= 0; k -= 1) {
+    if (from[k].abs === abs) { i = k; break; }
+  }
+  if (i === -1) {
+    vscode.window.setStatusBarMessage(`没有可${word}的操作`, 2000);
+    return;
+  }
+  const snap = from.splice(i, 1)[0];
+  try {
+    if (!fs.existsSync(abs)) { throw new Error('文件已不存在'); }
+    const cur = fs.readFileSync(abs, 'utf8');
+    to.push({ abs, root: entry.source.root, relPath: entry.file.relPath, content: cur });
+    fs.writeFileSync(abs, snap.content, 'utf8');
+    log(`[审查面板] ${word} ${entry.file.relPath}`);
+    vscode.window.setStatusBarMessage(`已${word}：${entry.file.relPath}`, 2000);
+    await afterLineOp(entry, undefined);
+  } catch (e) {
+    const msg = `${word}失败：${e.message}`;
+    log(msg);
+    showErr(msg);
+  }
+}
+
+/** 合并行：dir=up 把当前行并进上一行；dir=down 把下一行并进当前行 */
+async function mergeLineInFile(entry, lineNo, dir, text) {
+  pushSnapshot(entry);
+  const abs = entry.file.absPath;
+  if (!abs || !fs.existsSync(abs)) { return; }
+  try {
+    const lines = fs.readFileSync(abs, 'utf8').split('\n');
+    const idx = Number(lineNo) - 1;
+    if (!(idx >= 0 && idx < lines.length)) {
+      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未合并。`);
+      return;
+    }
+    if (dir === 'up') {
+      if (idx === 0) { return; }
+      const cur = typeof text === 'string' ? text : lines[idx];
+      lines[idx - 1] = lines[idx - 1] + cur;
+      lines.splice(idx, 1);
+      fs.writeFileSync(abs, lines.join('\n'), 'utf8');
+      log(`[审查面板] 已把 ${entry.file.relPath}:${lineNo} 并入上一行`);
+      await afterLineOp(entry, { focusLine: lineNo - 1 });
+      return;
+    }
+    if (idx + 1 >= lines.length) { return; } // 没有下一行可并
+    const next = lines[idx + 1];
+    lines[idx] = (typeof text === 'string' ? text : lines[idx]) + next;
+    lines.splice(idx + 1, 1);
+    fs.writeFileSync(abs, lines.join('\n'), 'utf8');
+    log(`[审查面板] 已把 ${entry.file.relPath}:${lineNo + 1} 并入上一行`);
+    await afterLineOp(entry, { focusLine: lineNo });
+  } catch (e) {
+    const msg = `合并行失败：${e.message}`;
+    log(msg);
+    showErr(msg);
+  }
+}
+
+/** 行级编辑后的收尾：只复查这一个文件（全量刷新太重，行内编辑会明显卡顿）+ 面板重渲染 */
+async function afterLineOp(entry, opts) {
+  await refreshSingleEntry(entry);
+  provider.refresh();
+  updateBadges();
+  if (panel && panel.entry && sameEntry(panel.entry, entry)) {
+    const f = opts && opts.focusLine ? { focusLine: Number(opts.focusLine) } : undefined;
+    await panel.reload(f);
+  }
+}
 
 /**
  * 把改动列表里的对应文件节点滚动到可见并高亮选中（bug 9 / 0.4.5 加固）。
@@ -794,6 +971,61 @@ async function nextUnreviewedInner(entry) {
   vscode.window.showInformationMessage('所有文件都已审查完毕 ✓');
 }
 
+/**
+ * 面板右键/按钮：把一个文件快捷写入 .crignore。
+ * 规则基准 = **该 .crignore 所在的目录**，也就是包含该文件的那个打开目录。
+ * 这与 .gitignore 完全一致：某个忽略文件里的规则，匹配的是「相对该忽略文件所在目录」的路径。
+ * （provider 端对项目忽略文件按各自 base 锚定匹配，见 util.matchExcludeSets。）
+ */
+async function blockFile(entry) {
+  if (!entry) { return; }
+  const folders = vscode.workspace.workspaceFolders || [];
+  const abs = entry.file.absPath;
+  const srcRoot = entry.source && entry.source.root ? entry.source.root : null;
+  // .crignore 落盘目录：优先「包含该文件的工作区目录」，否则来源根
+  let target = folders.find((f) => relToFolder(f.uri.fsPath, abs) !== null);
+  if (!target && srcRoot && relToFolder(srcRoot, abs) !== null) {
+    log(`[blockFile] ${abs} 不在任何工作区目录下，.crignore 写到来源根 ${srcRoot}`);
+    target = { uri: { fsPath: srcRoot } };
+  }
+  if (!target) {
+    vscode.window.showWarningMessage(`无法计算 ${entry.file.relPath} 的相对路径，未写入 .crignore`);
+    return;
+  }
+  // 规则 = 相对「该 .crignore 所在目录」的路径（同 .gitignore 语义）
+  const rel = relToFolder(target.uri.fsPath, abs) || entry.file.relPath;
+  let res = 'added';
+  try {
+    res = appendIgnoreRule(target.uri.fsPath, rel);
+  } catch (e) {
+    log(`写入 .crignore 失败：${e.message}`);
+    showErr(`写入 .crignore 失败：${e.message}`);
+    return;
+  }
+  log(`[blockFile] 规则=${rel}（基准=.crignore 所在目录 ${target.uri.fsPath}）→ ${path.join(target.uri.fsPath, '.crignore')} (${res})`);
+  // doRefresh 在已有刷新进行中会直接 return（refreshing 锁）→ 那样列表还是旧的，看起来像"没生效"。
+  // 先等当前刷新结束，再强制重建一次，确保新规则立刻起作用。
+  for (let i = 0; i < 40 && refreshing; i += 1) { await new Promise((r) => setTimeout(r, 50)); }
+  forceRedetect = true;
+  await doRefresh(true);
+  provider.refresh();
+  updateBadges();
+  const gone = !findEntry(entry.source.root, entry.file.relPath);
+  if (res === 'exists') {
+    vscode.window.setStatusBarMessage(`${rel} 已在 .crignore 中`, 3000);
+  } else {
+    vscode.window.setStatusBarMessage(`已屏蔽 ${rel}`, 3000);
+  }
+  if (!gone) {
+    // 写进去了但列表里还在：把真实原因记到日志，别让用户只看到「没生效」
+    log(`[blockFile] 警告：规则已写入，但 ${entry.file.relPath} 仍在列表中（规则=${rel}，基准=${baseNote}）`);
+  }
+  // 屏蔽后当前文件已不在列表 → 自动跳下一个待审查，不留在空面板
+  if (gone) {
+    await nextUnreviewed(null);
+  }
+}
+
 const handlers = {
   log: (msg) => log(msg),
   resolve: findEntry,
@@ -807,7 +1039,7 @@ const handlers = {
   rejectHunk: async (entry, index, sig) => { await rejectHunk(entry, index, sig); },
   unrejectHunk: async (entry, index, sig) => { await unrejectHunk(entry, index, sig); },
   toggleReviewed: async (entry) => {
-    // 面板里的「标记为已审查 / 取消」= git 暂存的显式入口：勾上 add、取消 reset
+    // 面板里的「标记已审查 / 取消」= git 暂存的显式入口：勾上 add、取消 reset
     const value = !entry.file.reviewed;
     await setReviewed(entry, value, { stageGit: true });
     await refreshSingleEntry(entry); // 拒绝块执行后文件可能已无差异 → 从列表移除
@@ -824,8 +1056,13 @@ const handlers = {
     if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
   },
   openInEditor: async (entry, line) => { await openBaseDiff(entry, line); },
-  editLine: async (entry, line, text, insertBelow, focusLine) => { await editLineInFile(entry, line, text, insertBelow, focusLine); },
+  editLine: async (entry, line, text, insertBelow, focusLine, opts) => { await editLineInFile(entry, line, text, insertBelow, focusLine, opts); },
   insertLine: async (entry, line) => { await insertLineInFile(entry, line); },
+  insertAbove: async (entry, line) => { await insertLineAboveInFile(entry, line); },
+  mergeLine: async (entry, line, dir, text) => { await mergeLineInFile(entry, line, dir, text); },
+  undoFile: async (entry) => { await undoFileOp(entry); },
+  redoFile: async (entry) => { await redoFileOp(entry); },
+  saveNow: async (entry) => { vscode.window.setStatusBarMessage(`所有改动已实时写入 ${entry.file.relPath}`, 2000); },
   deleteLine: async (entry, line, focusLine) => { await deleteLineInFile(entry, line, focusLine); },
   clusterRestore: async (entry, hunk, clus) => { await clusterRestoreInFile(entry, hunk, clus); },
   deleteLines: async (entry, lines) => { await deleteLinesInFile(entry, lines); },
@@ -835,7 +1072,19 @@ const handlers = {
     try { await vscode.env.clipboard.writeText(String(text == null ? '' : text)); }
     catch (e) { log(`写剪贴板失败：${e.message}`); }
   },
-  next: async (entry) => { await nextUnreviewed(entry); }
+  next: async (entry) => { await nextUnreviewed(entry); },
+  blockFile: async (entry) => { await blockFile(entry); },
+  ctxCmd: async (entry, cmd) => {
+    switch (cmd) {
+      case 'openDiff': await openBaseDiff(entry); break;
+      case 'accept': await acceptFile(entry); break;
+      case 'reject': await rejectFile(entry); break;
+      case 'mark': await handlers.toggleReviewed(entry); break;
+      case 'blockFile': await blockFile(entry); break;
+      case 'refresh': await doRefresh(true); provider.refresh(); updateBadges(); break;
+      default: log(`[panel] 未知右键命令: ${cmd}`);
+    }
+  }
 };
 
 function sameEntry(a, b) {
@@ -884,12 +1133,14 @@ async function refreshSingleEntry(entry) {
     if (fresh) { await panel.reload(); }
     else { panel.entry = null; await nextUnreviewed(null); }
   }
+  // 单文件复查后也顺手对账一次：挡住"块都打钩了却没标记"的漏网情况
+  await reconcileDecidedFiles();
   return false;
 }
 
 /**
- * 接受全部：只把文件标记为已审查，不 git add / 不改文件内容。
- * （0.4.5 语义：接受=对文件层面的判断；暂存只发生在显式「标记为已审查」打勾时）
+ * 接受全部：只把文件标记已审查，不 git add / 不改文件内容。
+ * （0.4.5 语义：接受=对文件层面的判断；暂存只发生在显式「标记已审查」打勾时）
  */
 async function acceptFile(entry) {
   const p = entry.source.provider;
@@ -898,7 +1149,7 @@ async function acceptFile(entry) {
   updateBadges();
   await revealInTree(entry, 6); // 接受后同样保持列表高亮跟随
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.showInformationMessage(`已接受 ${entry.file.relPath}（仅标记为已审查，未改动${p.id === 'git' ? '暂存区' : '文件'}）`);
+  vscode.window.showInformationMessage(`已接受 ${entry.file.relPath}（仅标记已审查，未改动${p.id === 'git' ? '暂存区' : '文件'}）`);
 }
 
 async function rejectFile(entry) {
@@ -922,21 +1173,22 @@ async function rejectFile(entry) {
     return;
   }
   const wasPanelFile = !!(panel && panel.entry && sameEntry(panel.entry, entry));
-  // 拒绝全部 = 内容已执行 → 自动标记为已审查（文件随后会从改动列表消失）
+  // 拒绝全部 = 内容已执行 → 自动标记已审查（文件随后会从改动列表消失）
   await setReviewed(entry, true);
   const didFull = await refreshSingleEntry(entry);
   // 单文件路径已由 refreshSingleEntry 处理面板；全量路径在此补“当前文件整个被还原 → 跳下一个”
   if (didFull && wasPanelFile && !findEntry(entry.source.root, entry.file.relPath)) {
     await nextUnreviewed(null);
   }
-  vscode.window.showInformationMessage(`已还原 ${entry.file.relPath}（自动标记为已审查）`);
+  vscode.window.showInformationMessage(`已还原 ${entry.file.relPath}（自动标记已审查）`);
 }
 
 /** 校验点击的块与当前 diff 是否一致（文件被编辑过时索引会漂移） */
 async function verifyHunkSig(entry, index, sig) {
   if (!sig) { return true; }
   const t = await entry.source.provider.getDiff(entry.file, cfg().get('contextLines', 3));
-  const hunks = parseDiff(t)[0].hunks;
+  const parsed = parseDiff(t)[0];
+  const hunks = parsed ? parsed.hunks : [];
   return !!hunks[index] && hunkSignature(hunks[index]) === sig;
 }
 
@@ -945,14 +1197,14 @@ async function rejectHunk(entry, index, sig) {
     vscode.window.showWarningMessage('文件内容已变化，该块位置对不上了，请刷新后重试。');
     return;
   }
-  // 只记录拒绝决定，不立即改文件——和接受块对称：执行统一发生在「标记为已审查」时，
+  // 只记录拒绝决定，不立即改文件——和接受块对称：执行统一发生在「标记已审查」时，
   // 之前随时可以撤销拒绝（反悔机会）
   await store.setHunkRejected(entry.source.root, entry.file.relPath, sig, true);
   await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, false); // 从已接受表移除（若之前接受过）
-  log(`已记录拒绝 ${entry.file.relPath} 第 ${index + 1} 块 (sig=${sig})，标记为已审查时执行还原`);
+  log(`已记录拒绝 ${entry.file.relPath} 第 ${index + 1} 块 (sig=${sig})，标记已审查时执行还原`);
   await autoMarkWhenAllHunksDone(entry);
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.setStatusBarMessage(`已拒绝 ${entry.file.relPath} 第 ${index + 1} 个改动块（标记为已审查时执行还原）`, 4000);
+  vscode.window.setStatusBarMessage(`已拒绝 ${entry.file.relPath} 第 ${index + 1} 个改动块（标记已审查时执行还原）`, 4000);
 }
 
 /** 撤销某个块的拒绝决定（反悔） */
@@ -963,7 +1215,7 @@ async function unrejectHunk(entry, index, sig) {
 }
 
 /**
- * 执行某文件所有待执行的拒绝块（标记为已审查时调用）。
+ * 执行某文件所有待执行的拒绝块（标记已审查时调用）。
  * 从最后一个块往前还原，避免 index 漂移。
  * 返回实际还原的块数；-1 表示执行失败（调用方不应继续标记）。
  */
@@ -1001,7 +1253,8 @@ async function applyPendingRejects(entry) {
 async function currentSig(entry, index) {
   try {
     const t = await entry.source.provider.getDiff(entry.file, cfg().get('contextLines', 3));
-    const hunks = parseDiff(t)[0].hunks;
+    const parsed = parseDiff(t)[0];
+    const hunks = parsed ? parsed.hunks : [];
     return hunks[index] ? hunkSignature(hunks[index]) : null;
   } catch (e) {
     return null;
@@ -1030,33 +1283,78 @@ async function acceptHunk(entry, index, sig) {
   vscode.window.setStatusBarMessage(`已接受 ${entry.file.relPath} 第 ${index + 1} 个改动块`, 3000);
 }
 
-/** 一个文件的所有改动块都有决定（接受或拒绝）→ 自动标记为已审查（拒绝块在此刻执行还原） */
+/** 一个文件的所有改动块都有决定（接受或拒绝）→ 自动标记已审查（拒绝块在此刻执行还原） */
 async function autoMarkWhenAllHunksDone(entry) {
   const fresh = findEntry(entry.source.root, entry.file.relPath);
   if (!fresh || fresh.file.reviewed) { return; }
   try {
     const t = await fresh.source.provider.getDiff(fresh.file, cfg().get('contextLines', 3));
-    const hunks = parseDiff(t)[0].hunks;
-    if (!hunks.length) { return; }
+    const parsed = parseDiff(t)[0];
+    const hunks = parsed ? parsed.hunks : [];
+    if (!hunks.length) {
+      log(`[autoMark] ${fresh.file.relPath} 当前解析不到改动块，跳过自动标记`);
+      return;
+    }
     const acc = store.getReviewedHunks(fresh.source.root, fresh.file.relPath);
     const rej = store.getRejectedHunks(fresh.source.root, fresh.file.relPath);
-    const allDone = hunks.every((h) => { const s = hunkSignature(h); return acc[s] || rej[s]; });
-    if (allDone) {
-      await setReviewed(fresh, true); // 内部会执行所有待执行的拒绝块（还原）
-      await refreshSingleEntry(fresh); // 拒绝执行后文件可能已无差异 → 从列表移除
-      provider.refresh();
-      updateBadges();
-      log(`${fresh.file.relPath} 全部改动块已决定（接受/拒绝），自动标记为已审查`);
-      // 文件已无差异 → 自动跳到下一个待审查，不留在"没有差异"的空面板
-      if (!findEntry(fresh.source.root, fresh.file.relPath)) {
-        log(`${fresh.file.relPath} 已无差异，自动跳到下一个待审查`);
-        await nextUnreviewed(null);
-      } else if (panel && panel.entry && sameEntry(panel.entry, fresh)) {
-        await panel.reload();
-      }
+    const pending = hunks.filter((h) => { const s = hunkSignature(h); return !(acc[s] || rej[s]); });
+    if (pending.length) {
+      log(`[autoMark] ${fresh.file.relPath} 还有 ${pending.length}/${hunks.length} 个块未决定，暂不标记`);
+      return;
+    }
+    await setReviewed(fresh, true); // 内部会执行所有待执行的拒绝块（还原）
+    await refreshSingleEntry(fresh); // 拒绝执行后文件可能已无差异 → 从列表移除
+    provider.refresh();
+    updateBadges();
+    log(`${fresh.file.relPath} 全部改动块已决定（接受/拒绝），自动标记已审查`);
+    // 文件已无差异 → 自动跳到下一个待审查，不留在"没有差异"的空面板
+    if (!findEntry(fresh.source.root, fresh.file.relPath)) {
+      log(`${fresh.file.relPath} 已无差异，自动跳到下一个待审查`);
+      await nextUnreviewed(null);
+    } else if (panel && panel.entry && sameEntry(panel.entry, fresh)) {
+      await panel.reload();
     }
   } catch (e) {
     log(`自动打钩检查失败：${e.message}`);
+  }
+}
+
+/**
+ * 兜底对账：把「所有改动块都已决定（接受/拒绝）但没被标记已审查」的文件补上标记。
+ * 触发时机太多（块级点击、面板重渲染、自动刷新换掉了 model 对象、撤销拒绝…），
+ * 只靠点击那一刻的检查容易漏；这里在每次刷新收尾统一对账一次，保证「全打钩」= 已审查。
+ * 只处理 store 里记过块决定的文件，代价很小。
+ */
+let reconciling = false;
+async function reconcileDecidedFiles() {
+  if (reconciling) { return; }
+  reconciling = true;
+  try {
+    for (const e of model.flat.slice()) {
+      if (e.file.reviewed) { continue; }
+      const root = e.source.root;
+      const rel = e.file.relPath;
+      const acc = store.getReviewedHunks(root, rel);
+      const rej = store.getRejectedHunks(root, rel);
+      if (!Object.keys(acc).length && !Object.keys(rej).length) { continue; } // 没块决定，跳过
+      try {
+        const t = await e.source.provider.getDiff(e.file, cfg().get('contextLines', 3));
+        const parsed = parseDiff(t)[0];
+        const hunks = parsed ? parsed.hunks : [];
+        if (!hunks.length) { continue; }
+        const allDone = hunks.every((h) => { const s = hunkSignature(h); return acc[s] || rej[s]; });
+        if (!allDone) { continue; }
+        log(`[对账] ${rel} 所有改动块都已决定但未标记 → 补标记已审查`);
+        await setReviewed(e, true);
+        await refreshSingleEntry(e);
+      } catch (err) {
+        log(`[对账] ${rel} 失败：${err.message}`);
+      }
+    }
+    provider.refresh();
+    updateBadges();
+  } finally {
+    reconciling = false;
   }
 }
 
@@ -1265,6 +1563,10 @@ async function activate(context) {
       vscode.window.showInformationMessage('已创建 .crignore：每行一个 glob，保存后自动生效。');
     }
   });
+  register('changeReview.blockFile', async (arg) => {
+    const entry = resolveArg(arg);
+    if (entry) { await blockFile(entry); }
+  });
   register('changeReview.initBaseline', (arg) => initBaseline(arg));
   register('changeReview.updateBaseline', (arg) => updateBaseline(arg));
   register('changeReview.openReview', async (arg) => {
@@ -1308,7 +1610,7 @@ async function activate(context) {
     for (const e of model.flat) { e.file.reviewed = true; }
     provider.refresh();
     updateBadges();
-    vscode.window.setStatusBarMessage(`已把 ${model.flat.length} 个文件标记为已审查`, 3000);
+    vscode.window.setStatusBarMessage(`已把 ${model.flat.length} 个文件标记已审查`, 3000);
   });
   register('changeReview.clearReviewed', async () => {
     await store.clearAll();

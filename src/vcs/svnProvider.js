@@ -130,8 +130,10 @@ class SvnProvider {
     // 手动排除规则：用户填的 glob 列表（默认空），对所有改动生效（包括版本化的
     // 修改与删除、以及未版本化项）。设 [] 表示不额外排除。
     this.exclude = Array.isArray(options && options.exclude) ? options.exclude : [];
+    // 项目忽略文件（.crignore / .gitignore fallback）：按「各自规则文件所在目录」锚定（同 .gitignore 语义）
+    this.excludeSets = Array.isArray(options && options.excludeSets) ? options.excludeSets : [];
     this.capabilities = {
-      stage: false,       // SVN 没有暂存区，“接受”只能标记为已审查
+      stage: false,       // SVN 没有暂存区，“接受”只能标记已审查
       hunkStage: false,
       hunkRevert: true,
       revertFile: true,
@@ -155,6 +157,12 @@ class SvnProvider {
 
   abs(relPath) {
     return util.relToAbs(this.root, relPath);
+  }
+
+  /** 某个「仓库相对路径」是否被排除（设置项按仓库根；项目忽略文件按各自所在目录锚定） */
+  isExcluded(relPath) {
+    if (this.exclude.length && util.matchAny(relPath, this.exclude)) { return true; }
+    return util.matchExcludeSets(this.abs(relPath), this.excludeSets);
   }
 
   /** BASE 版本内容（带缓存，缓存以文件 size/mtime 为失效依据） */
@@ -201,8 +209,8 @@ class SvnProvider {
       const kind = classify(row);
       if (kind === 'ignored') { continue; }
       if (!this.inScope(row.relPath)) { continue; }
-      // 命中用户手动填的排除规则：跳过（对所有 kind 生效，包括 M/A/D/?）
-      if (this.exclude.length && util.matchAny(row.relPath, this.exclude)) { continue; }
+      // 命中排除规则：跳过（对所有 kind 生效，包括 M/A/D/?）
+      if (this.isExcluded(row.relPath)) { continue; }
       const abs = this.abs(row.relPath);
       let isDir = false;
       try {
@@ -217,10 +225,15 @@ class SvnProvider {
       files.push(this.makeFile(row.relPath, kind, row.text));
     }
 
-    // 未版本化的目录：展开其中的文件（排除规则按仓库相对路径匹配，命中即跳过）
+    // 未版本化的目录：展开其中的文件（排除规则命中即跳过）
     for (const dir of dirQueue) {
-      if (this.exclude.length && util.matchAny(dir, this.exclude)) { continue; }
-      const { files: found } = util.walk(this.abs(dir), { maxFiles: 5000, exclude: this.exclude, excludeFrom: dir });
+      if (this.isExcluded(dir)) { continue; }
+      const { files: found } = util.walk(this.abs(dir), {
+        maxFiles: 5000,
+        exclude: this.exclude,
+        excludeFrom: dir,
+        excludeSets: this.excludeSets
+      });
       for (const f of found) {
         const rel = dir + '/' + f.relPath;
         files.push(this.makeFile(rel, 'untracked', '?'));

@@ -2,7 +2,7 @@
   "name": "change-review",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.4.12",
+  "version": "0.4.20",
   "publisher": "local",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -126,6 +126,11 @@
         "icon": "$(filter)"
       },
       {
+        "command": "changeReview.blockFile",
+        "title": "%cmd.blockFile%",
+        "icon": "$(circle-slash)"
+      },
+      {
         "command": "changeReview.showLog",
         "title": "%cmd.showLog%"
       }
@@ -214,6 +219,11 @@
           "command": "changeReview.configureExclude",
           "when": "view == changeReview.files && viewItem =~ /^changeReview/",
           "group": "6_conf@1"
+        },
+        {
+          "command": "changeReview.blockFile",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "2_action@3"
         }
       ]
     },

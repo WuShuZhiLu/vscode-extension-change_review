@@ -61,7 +61,7 @@ class ReviewStore {
     return this.save();
   }
 
-  // ---- 已拒绝块表：拒绝块只记录决定，不立即改文件；标记为已审查时统一执行还原 ----
+  // ---- 已拒绝块表：拒绝块只记录决定，不立即改文件；标记已审查时统一执行还原 ----
   rejectedKey(root, relPath) {
     return `${this.key(root, relPath)}::rejected`;
   }

@@ -17,11 +17,7 @@ const vscodeMock = {
   TreeItemCheckboxState: { Unchecked: 0, Checked: 1 },
   ThemeIcon: class { constructor(id) { this.id = id; } },
   MarkdownString: class { constructor(v) { this.value = v; } },
-  Uri: { file: (p) => ({ fsPath: p }), from: (o) => o },
-  env: { language: 'zh-cn' },
-  workspace: {
-    getConfiguration: () => ({ get: (_k, d) => d })
-  }
+  Uri: { file: (p) => ({ fsPath: p }), from: (o) => o }
 };
 const origLoad = Module._load;
 Module._load = function (request) {
@@ -75,9 +71,7 @@ const html = buildHtml({
   },
   parsed,
   repoName: 'review',
-  cspSource: '*',
-  // 离线预览没有 VSCode 配置源，用 4 空格（与 VSCode 默认 editor.tabSize 一致）
-  indent: { tabSize: 4, insertSpaces: true }
+  cspSource: '*'
 });
 
 // 脱离 VSCode 时补上主题变量 + 去掉 CSP 限制，便于本地预览

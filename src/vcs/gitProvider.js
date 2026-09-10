@@ -21,8 +21,10 @@ class GitProvider {
     this.scopes = new Set(); // 空 = 整个仓库；非空 = 只列这些打开目录内的改动
     // 手动排除（glob，相对仓库根），对所有 kind 生效；默认空
     this.exclude = Array.isArray(options && options.exclude) ? options.exclude : [];
+    // 项目忽略文件（.crignore / .gitignore fallback）：按「各自规则文件所在目录」锚定（同 .gitignore 语义）
+    this.excludeSets = Array.isArray(options && options.excludeSets) ? options.excludeSets : [];
     this.capabilities = {
-      stage: false,       // 0.4.5：接受不再 git add；暂存只在「标记为已审查」打勾时发生
+      stage: false,       // 0.4.5：接受不再 git add；暂存只在「标记已审查」打勾时发生
       hunkStage: false,   // 块级接受也只标记，不再 git apply --cached
       hunkRevert: true,
       revertFile: true,
@@ -44,8 +46,8 @@ class GitProvider {
   }
 
   inExclude(file) {
-    if (!this.exclude.length) { return false; }
-    return util.matchAny(file.relPath, this.exclude);
+    if (this.exclude.length && util.matchAny(file.relPath, this.exclude)) { return true; }
+    return util.matchExcludeSets(file.absPath, this.excludeSets);
   }
 
   async listChanges() {
@@ -96,7 +98,7 @@ class GitProvider {
     return git.getHeadContent(this.root, file);
   }
 
-  /** git add（把文件加入暂存区）——只在「标记为已审查」勾选时调用（0.4.5 语义） */
+  /** git add（把文件加入暂存区）——只在「标记已审查」勾选时调用（0.4.5 语义） */
   async stageFile(file) {
     await git.acceptFile(this.root, file);
     return { staged: true, message: '已 git add' };
@@ -121,10 +123,10 @@ class GitProvider {
 
   /**
    * 接受此块（0.4.5 起 git 与 svn/快照一致）：只打上"已接受"标记，
-   * 不 git apply --cached、不改工作区。暂存只发生在「标记为已审查」打勾时。
+   * 不 git apply --cached、不改工作区。暂存只发生在「标记已审查」打勾时。
    */
   async acceptHunk(file) {
-    return { staged: false, message: '该块已标记为已接受（暂存发生在标记为已审查时）' };
+    return { staged: false, message: '该块已标记为已接受（暂存发生在标记已审查时）' };
   }
 
   async rejectHunk(file, hunkIndex, contextLines = 3) {

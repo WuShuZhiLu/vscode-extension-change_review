@@ -479,6 +479,63 @@ async function testGitSubdirScope(baseDir) {
   CWD = baseDir;
 }
 
+// 真实场景回归：svn 根 A 下，VSCode 只打开子目录 A/sub2。
+// A/sub2/.crignore 里写的是「相对 A/sub2」的路径（同 .gitignore 语义），
+// 而 provider 拿到的 relPath 是相对 svn 根 A 的（带 sub2/ 前缀）——
+// 只要匹配端按「.crignore 所在目录」锚定，这条规则就必须命中。
+async function testSvnCrignoreSubdir(baseDir) {
+  console.log('\n[SVN .crignore 锚定] 打开子目录时 .crignore 规则仍命中');
+  const root = path.join(baseDir, 'svncrig');
+  const repo = path.join(root, 'repo');
+  const wc = path.join(root, 'wc');
+  fs.mkdirSync(root, { recursive: true });
+  const svn = (args, cwd) => execFileSync('svn', args, { cwd: cwd || root, encoding: 'utf8' });
+  const svnadmin = (args) => execFileSync('svnadmin', args, { cwd: root, encoding: 'utf8' });
+
+  svnadmin(['create', repo]);
+  const url = 'file:///' + repo.split(path.sep).join('/').replace(/^([A-Za-z]):/, (m, d) => d.toLowerCase() + ':');
+  svn(['co', url, wc]);
+  CWD = wc;
+
+  const sub2 = path.join(wc, 'sub2');
+  const relInSub2 = 'components/api/file_server_lib/web_assets/web_assets_version.csv';
+  const relFromRoot = 'sub2/' + relInSub2;
+  const absTarget = path.join(sub2, relInSub2.split('/').join(path.sep));
+  fs.mkdirSync(path.dirname(absTarget), { recursive: true });
+  fs.writeFileSync(absTarget, 'a,b,c\n1,2,3\n', 'utf8');
+  write('sub2/keep.txt', 'keep\n');
+  svn(['add', 'sub2'], wc);
+  svn(['commit', '-m', 'init'], wc);
+  // 制造改动：目标文件 + 一个不该被误伤的同级文件
+  fs.writeFileSync(absTarget, 'a,b,c\n9,9,9\n', 'utf8');
+  write('sub2/keep.txt', 'keep changed\n');
+
+  const rules = [relInSub2];
+  const mkProvider = (sets) => {
+    const p = new vcs.SvnProvider(wc, sets ? { excludeSets: sets } : {});
+    p.addScope(sub2);
+    return p;
+  };
+
+  // 1) 不带 .crignore 规则：两个文件都在
+  const before = (await mkProvider(null).listChanges()).map((f) => f.relPath).sort();
+  console.log('    屏蔽前改动:', before.join(', '));
+  check('未配置 .crignore 时目标文件在列表里', before.includes(relFromRoot), before.join(','));
+
+  // 2) 带「相对 .crignore 所在目录」的规则：目标文件被排除，同级文件不受影响
+  const after = (await mkProvider([{ base: sub2, rules }]).listChanges()).map((f) => f.relPath).sort();
+  console.log('    屏蔽后改动:', after.join(', '));
+  check('.crignore 规则（相对所在目录）命中：目标文件被排除', !after.includes(relFromRoot), after.join(','));
+  check('同级文件不被误伤', after.includes('sub2/keep.txt'), after.join(','));
+
+  // 3) 反证：如果规则被错当成「相对 svn 根」拍平匹配，就命中不了（这正是修复前的 bug）
+  const flat = (await mkProvider(null).listChanges()).length; // 仅取数量做对照
+  const wrongly = rules.some((r) => relFromRoot === r);
+  check('对照：规则文本 ≠ 相对 svn 根的路径（说明锚定方式才是关键）', !wrongly && flat === 2, `${wrongly} ${flat}`);
+
+  CWD = baseDir;
+}
+
 (async () => {
   const baseDir = path.join(os.tmpdir(), 'cr-vcscheck-' + Date.now());
   fs.mkdirSync(baseDir, { recursive: true });
@@ -486,6 +543,7 @@ async function testGitSubdirScope(baseDir) {
     testDiffEngine();
     await testSnapshot(baseDir);
     await testSvnSubdirScope(baseDir);
+    await testSvnCrignoreSubdir(baseDir);
     await testGitSubdirScope(baseDir);
     await testSvnDetectDepth(baseDir);
     await testExclude(baseDir);

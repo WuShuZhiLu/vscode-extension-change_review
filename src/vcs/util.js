@@ -163,16 +163,50 @@ function matchAny(relPath, patterns) {
 }
 
 /**
+ * 取 absPath 相对 base 的 posix 路径；不在 base 之下（或以 .. 开头）返回 null。
+ */
+function relFromBase(base, absPath) {
+  if (!base || !absPath) { return null; }
+  let rel;
+  try {
+    rel = path.relative(base, absPath);
+  } catch (e) {
+    return null;
+  }
+  if (!rel || rel === '.') { return null; }
+  if (rel === '..' || rel.startsWith('..' + path.sep) || rel.startsWith('../') || path.isAbsolute(rel)) { return null; }
+  return rel.split(path.sep).join('/');
+}
+
+/**
+ * 与 .gitignore 一致的匹配：某个规则文件（.crignore / .gitignore）里的规则，
+ * 匹配的是「相对该规则文件所在目录」的路径 —— 不是相对仓库根。
+ * sets: [{ base: 规则文件所在目录（绝对路径）, rules: string[] }]
+ */
+function matchExcludeSets(absPath, sets) {
+  if (!absPath || !sets || !sets.length) { return false; }
+  for (const s of sets) {
+    if (!s || !s.base || !s.rules || !s.rules.length) { continue; }
+    const rel = relFromBase(s.base, absPath);
+    if (rel === null) { continue; }
+    if (matchAny(rel, s.rules)) { return true; }
+  }
+  return false;
+}
+
+/**
  * 遍历目录下的普通文件。
  * @param {string} dir 要遍历的目录（绝对路径）
  * @param {object} opts
  *  - exclude: 忽略模式（glob）。默认按「相对 walk 根」匹配；
  *    传了 excludeFrom（相对仓库根的正斜杠路径）时，改为按「仓库根相对路径」匹配，
  *    用于遍历 svn 里某个未版本化子目录时仍能命中仓库级的忽略规则。
+ *  - excludeSets: 按「各自规则文件所在目录」锚定的规则集（见 matchExcludeSets）。
  * @returns {Array<{relPath:string, absPath:string, size:number, mtimeMs:number}>}
  */
 function walk(dir, opts = {}) {
   const exclude = opts.exclude || [];
+  const excludeSets = opts.excludeSets || [];
   const maxFiles = opts.maxFiles || 20000;
   const skipDirs = opts.skipDirs || ['.git', '.svn', '.hg', '.workbuddy'];
   const excludeFrom = opts.excludeFrom
@@ -181,7 +215,8 @@ function walk(dir, opts = {}) {
   const out = [];
   let truncated = false;
 
-  const matchExcl = (rel) => (excludeFrom ? matchAny(excludeFrom + '/' + rel, exclude) : matchAny(rel, exclude));
+  const matchExcl = (rel, abs) => (excludeFrom ? matchAny(excludeFrom + '/' + rel, exclude) : matchAny(rel, exclude))
+    || matchExcludeSets(abs, excludeSets);
 
   const rec = (cur, relBase) => {
     if (out.length >= maxFiles) { truncated = true; return; }
@@ -202,12 +237,12 @@ function walk(dir, opts = {}) {
       }
       if (st.isDirectory()) {
         if (skipDirs.indexOf(name) !== -1) { continue; }
-        if (matchExcl(rel)) { continue; }
+        if (matchExcl(rel, abs)) { continue; }
         rec(abs, rel);
         continue;
       }
       if (!st.isFile()) { continue; }
-      if (matchExcl(rel)) { continue; }
+      if (matchExcl(rel, abs)) { continue; }
       if (out.length >= maxFiles) { truncated = true; return; }
       out.push({ relPath: rel, absPath: abs, size: st.size, mtimeMs: st.mtimeMs });
     }
@@ -348,6 +383,8 @@ module.exports = {
   globToRegExp,
   globSource,
   matchAny,
+  relFromBase,
+  matchExcludeSets,
   walk,
   sha1,
   fileHash,

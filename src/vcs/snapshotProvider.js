@@ -28,6 +28,8 @@ class SnapshotProvider {
     };
     // 运行时列表排除（来自 changeReview.exclude），对所有 kind 生效；不影响基准
     this.runtimeExclude = Array.isArray(options.runtimeExclude) ? options.runtimeExclude : [];
+    // 项目忽略文件（.crignore / .gitignore fallback）：按「各自规则文件所在目录」锚定（同 .gitignore 语义）
+    this.excludeSets = Array.isArray(options.excludeSets) ? options.excludeSets : [];
     this.baseLabel = '基准快照';
     this.capabilities = {
       stage: false,
@@ -226,10 +228,10 @@ class SnapshotProvider {
     });
     if (candidates.length) { this.saveIndex(); }
 
-    // 运行时手动排除：用户填的 exclude 列表对所有 kind 生效
-    const filtered = this.runtimeExclude.length
-      ? changed.filter((f) => !util.matchAny(f.relPath, this.runtimeExclude))
-      : changed;
+    // 运行时排除：设置项（按快照根）+ 项目忽略文件（按各自所在目录锚定），对所有 kind 生效
+    const filtered = changed.filter((f) => (this.runtimeExclude.length && util.matchAny(f.relPath, this.runtimeExclude))
+      ? false
+      : !util.matchExcludeSets(f.absPath, this.excludeSets));
 
     const result = [];
     await util.mapLimit(filtered, 8, async (file) => {
