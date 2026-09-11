@@ -24,8 +24,8 @@ class GitProvider {
     // 项目忽略文件（.crignore / .gitignore fallback）：按「各自规则文件所在目录」锚定（同 .gitignore 语义）
     this.excludeSets = Array.isArray(options && options.excludeSets) ? options.excludeSets : [];
     this.capabilities = {
-      stage: false,       // 0.4.5：接受不再 git add；暂存只在「标记已审查」打勾时发生
-      hunkStage: false,   // 块级接受也只标记，不再 git apply --cached
+      stage: true,        // 「标记为已审查」= git add（接受全部 / 自动打钩 / 树上打勾 都会走这一步）
+      hunkStage: false,   // 块级接受只记录标记，不做 git apply --cached
       hunkRevert: true,
       revertFile: true,
       baselineUpdate: false

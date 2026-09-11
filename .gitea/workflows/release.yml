@@ -1,0 +1,45 @@
+name: Release
+
+# 打 tag 即发版：自动打包 vsix + 源码包，并作为 Release 资产上传（Gitea Actions）。
+# 版本号以 package.json 为准，且必须与 tag 一致（tag 可写 v0.5.0-pre 或 0.5.0-pre）。
+#
+# 前置条件：
+#   1. 仓库已启用 Actions（仓库 → 设置 → 高级/仓库设置里打开 Actions），并注册了 runner；
+#   2. runner 镜像里要有 Node.js >= 18（脚本用了内置 fetch 调 API）；
+#      若镜像里没有，把下面的「准备 Node.js」一步换成 actions/setup-node@v4。
+#   GITHUB_TOKEN 由 Gitea 自动注入，无需手工配置 secret。
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        run: |
+          if ! command -v node >/dev/null 2>&1; then
+            echo "runner 镜像里没有 node。请给 runner 装 Node.js >= 18，或把这一步换成 actions/setup-node@v4"
+            exit 1
+          fi
+          node -v
+
+      - name: 跑测试（打包前先确认没坏）
+        run: |
+          node tools/selfcheck.js
+          node tools/mockcheck.js
+          node tools/vcscheck.js
+
+      - name: 打包并发布（vsix + 源码包）
+        run: node tools/release.js --upload
+        env:
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          # Gitea 若没提供 api_url，脚本会回落到 GITHUB_API_URL / GITHUB_SERVER_URL + /api/v1
+          RELEASE_API_URL: ${{ github.api_url }}

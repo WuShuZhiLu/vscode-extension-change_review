@@ -116,6 +116,38 @@ async function buildProviders(folders, opts = {}) {
     providers.push(p);
   };
 
+  /**
+   * 扫一层子目录找 git/svn 仓库（多仓库工作区，如 A/b、A/c 各自是仓库）。
+   * 永远禁用快照——快照只留给「整个目录树都扫不到仓库」的兜底。
+   */
+  const scanSubRepos = async (folder) => {
+    const found = [];
+    const childOpts = Object.assign({}, options, { allowSnapshot: false });
+    let names = [];
+    try {
+      names = fs.readdirSync(folder);
+    } catch (e) {
+      names = [];
+    }
+    for (const name of names) {
+      const child = path.join(folder, name);
+      if (!markExists(child)) { continue; }
+      if (name === 'node_modules' || name.startsWith('.')) { continue; }
+      try {
+        const r = await detectIn(child, childOpts);
+        if (r.provider && r.kind !== 'snapshot') { found.push(r.provider); }
+        else { for (const p of r.problems || []) { problems.push(`${child}: ${p}`); } }
+      } catch (e) {
+        if (e && e.dubiousRoot) { throw e; }
+        problems.push(`${child}: ${e.message}`);
+        if (e && e.noGit) {
+          failures.push({ kind: 'git-missing', folder: child, message: e.message });
+        }
+      }
+    }
+    return found;
+  };
+
   for (const folder of folders || []) {
     if (!markExists(folder)) { continue; }
     let res;
@@ -129,45 +161,24 @@ async function buildProviders(folders, opts = {}) {
       }
       continue;
     }
-    if (res.provider) {
+    if (res.provider && res.kind !== 'snapshot') {
       push(res.provider);
       continue;
     }
     for (const p of res.problems || []) { problems.push(`${folder}: ${p}`); }
 
-    // 目录本身不是仓库：扫一层子目录（多仓库工作区）
-    let names = [];
-    try {
-      names = fs.readdirSync(folder);
-    } catch (e) {
-      names = [];
-    }
-    for (const name of names) {
-      const child = path.join(folder, name);
-      if (!markExists(child)) { continue; }
-      if (name === 'node_modules' || name.startsWith('.')) { continue; }
-      try {
-        const r = await detectIn(child, options);
-        if (r.provider && r.kind !== 'snapshot') { push(r.provider); }
-      } catch (e) {
-        if (e && e.dubiousRoot) { throw e; }
-        problems.push(`${child}: ${e.message}`);
-        if (e && e.noGit) {
-          failures.push({ kind: 'git-missing', folder: child, message: e.message });
-        }
-      }
-    }
+    // 目录本身不是 git/svn 仓库（或快照兜底抢先返回了）：先扫一层子目录
+    const subs = await scanSubRepos(folder);
+    for (const sp of subs) { push(sp); }
+    if (subs.length) { continue; }
 
     // 扫完仍然什么都没有 → 该目录走快照基准
     if (options.allowSnapshot && !providers.some((p) => p.root === folder)) {
-      const anyChild = providers.some((p) => p.root.startsWith(folder));
-      if (!anyChild) {
-        push(new snapshotProvider.SnapshotProvider(
-          folder,
-          options.storageDir,
-          Object.assign({}, options.snapshotOptions, { runtimeExclude: options.exclude, excludeSets: options.excludeSets })
-        ));
-      }
+      push(new snapshotProvider.SnapshotProvider(
+        folder,
+        options.storageDir,
+        Object.assign({}, options.snapshotOptions, { runtimeExclude: options.exclude, excludeSets: options.excludeSets })
+      ));
     }
   }
 

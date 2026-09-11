@@ -32,6 +32,28 @@ class ReviewStore {
     return this.save();
   }
 
+  // ---- 手动「取消审查」后的自动标记抑制 ----
+  // 用户手动取消审查，就是要自己接着操作（改内容、重新审），不能被自动标记立刻又打上钩。
+  // 记录抑制时的文件指纹：文件内容一变（hash 变了）抑制自动失效，恢复到正常的「块都决定了就自动打钩」。
+  autoMarkOffKey(root, relPath) {
+    return `${this.key(root, relPath)}::autoMarkOff`;
+  }
+
+  isAutoMarkOff(root, relPath, hash) {
+    const rec = this.data[this.autoMarkOffKey(root, relPath)];
+    return !!(rec && rec.hash === hash);
+  }
+
+  setAutoMarkOff(root, relPath, hash) {
+    this.data[this.autoMarkOffKey(root, relPath)] = { hash, at: Date.now() };
+    return this.save();
+  }
+
+  clearAutoMarkOff(root, relPath) {
+    delete this.data[this.autoMarkOffKey(root, relPath)];
+    return this.save();
+  }
+
   markAll(entries) {
     for (const e of entries) {
       const root = e.source ? e.source.root : e.repo.root;

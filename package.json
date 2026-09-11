@@ -2,7 +2,7 @@
   "name": "change-review",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.4.20",
+  "version": "0.5.0-pre1",
   "publisher": "local",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -34,8 +34,11 @@
     "mockcheck": "node tools/mockcheck.js",
     "preview": "node tools/preview.js",
     "package": "npx -y @vscode/vsce@latest package --no-yarn --allow-missing-repository",
-    "install-local": "code --install-extension ./change-review-0.4.6.vsix --force",
-    "vcscheck": "node tools/vcscheck.js"
+    "install-local": "node tools/release.js --install",
+    "vcscheck": "node tools/vcscheck.js",
+    "release": "node tools/release.js",
+    "releasecheck": "node tools/releasecheck.js",
+    "check": "node tools/selfcheck.js && node tools/mockcheck.js && node tools/vcscheck.js && node tools/releasecheck.js"
   },
   "contributes": {
     "viewsContainers": {
@@ -211,19 +214,19 @@
           "group": "4_nav@1"
         },
         {
+          "command": "changeReview.blockFile",
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
+          "group": "5_ignore@1"
+        },
+        {
           "command": "changeReview.updateBaseline",
           "when": "view == changeReview.files && viewItem =~ /^changeReviewRepo_snapshot/",
-          "group": "5_base@1"
+          "group": "6_base@1"
         },
         {
           "command": "changeReview.configureExclude",
-          "when": "view == changeReview.files && viewItem =~ /^changeReview/",
-          "group": "6_conf@1"
-        },
-        {
-          "command": "changeReview.blockFile",
-          "when": "view == changeReview.files && viewItem =~ /^changeReviewFile/",
-          "group": "2_action@3"
+          "when": "view == changeReview.files && viewItem =~ /^changeReviewRepo/",
+          "group": "7_conf@1"
         }
       ]
     },

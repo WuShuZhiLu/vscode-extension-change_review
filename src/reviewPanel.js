@@ -32,14 +32,13 @@ const PANEL_I18N = {
     rejectAll: '拒绝全部',
     hunkAccept: '接受此块',
     hunkAcceptTitle: '接受这个改动块（标记为已接受，不动文件内容与暂存区；暂存在「标记已审查」时发生）',
+    hunkUnaccept: '取消接受',
+    hunkUnacceptTitle: '取消这个块的接受决定，回到未决定状态（暂存区在「标记已审查」时才会动）',
     hunkReject: '拒绝此块',
     hunkRejectTitle: '记录拒绝这个改动块（不立即改文件；标记已审查时统一执行还原，之前可反悔）',
     hunkRejectedBadge: '拒绝·待执行',
     hunkUnreject: '撤销拒绝',
     hunkUnrejectTitle: '取消这个块的拒绝决定，恢复为未决定状态',
-    blockFile: '屏蔽此文件',
-    blockFileTitle: '把这个文件写入 .crignore，之后不再出现在改动列表里',
-    blockFileDone: '已屏蔽 ✓',
     ctxAccept: '接受全部改动',
     ctxReject: '拒绝全部改动',
     ctxMarkReviewed: '标记已审查',
@@ -47,7 +46,7 @@ const PANEL_I18N = {
     btnMark: '标记已审查',
     btnUnmark: '取消审查',
     btnMarkTitle: '切换这个文件是否已审查',
-    ctxBlock: '屏蔽此文件',
+    ctxBlock: '忽略该文件',
     ctxOpenDiff: '打开新旧对比',
     ctxRefresh: '刷新列表',
     ctxCopyPath: '复制文件路径',
@@ -72,14 +71,13 @@ const PANEL_I18N = {
     rejectAll: 'Reject all',
     hunkAccept: 'Accept block',
     hunkAcceptTitle: 'Accept this change block (mark as accepted; staging happens on "Mark as reviewed")',
+    hunkUnaccept: 'Unaccept',
+    hunkUnacceptTitle: 'Cancel the accept decision for this block (back to undecided; staging only changes on "Mark as reviewed")',
     hunkReject: 'Reject block',
     hunkRejectTitle: 'Mark this block as rejected (file is not changed yet; reverts are applied when the file is marked as reviewed)',
     hunkRejectedBadge: 'Rejected · pending',
     hunkUnreject: 'Undo reject',
     hunkUnrejectTitle: 'Cancel the reject decision for this block (back to undecided)',
-    blockFile: 'Ignore this file',
-    blockFileTitle: 'Add this file to .crignore so it stops showing up in the change list',
-    blockFileDone: 'Ignored ✓',
     ctxAccept: 'Accept all changes',
     ctxReject: 'Reject all changes',
     ctxMarkReviewed: 'Mark as reviewed',
@@ -87,7 +85,7 @@ const PANEL_I18N = {
     btnMark: 'Mark as reviewed',
     btnUnmark: 'Unmark reviewed',
     btnMarkTitle: 'Toggle whether this file is reviewed',
-    ctxBlock: 'Ignore this file (write to .crignore)',
+    ctxBlock: 'Ignore this file',
     ctxOpenDiff: 'Open old/new diff',
     ctxRefresh: 'Refresh list',
     ctxCopyPath: 'Copy file path',
@@ -171,7 +169,12 @@ function renderHunk(hunk, index, opts) {
   const rejected = !!(opts.rejectedSigs && opts.rejectedSigs[sig]);
   const actions = [];
   if (opts.canAcceptHunk) {
-    actions.push(`<button class="mini ok" data-cmd="hunkAccept" data-index="${index}" data-sig="${sig}" title="${t('hunkAcceptTitle')}">${t('hunkAccept')}</button>`);
+    if (reviewed) {
+      // 和「撤销拒绝」对称：已接受的块也能取消，取消后回到待审查
+      actions.push(`<button class="mini" data-cmd="hunkUnaccept" data-index="${index}" data-sig="${sig}" title="${t('hunkUnacceptTitle')}">${t('hunkUnaccept')}</button>`);
+    } else {
+      actions.push(`<button class="mini ok" data-cmd="hunkAccept" data-index="${index}" data-sig="${sig}" title="${t('hunkAcceptTitle')}">${t('hunkAccept')}</button>`);
+    }
   }
   if (opts.canRevertHunk) {
     if (rejected) {
@@ -343,7 +346,6 @@ function buildHtml(ctx) {
     <button class="danger" data-cmd="reject" title="${escapeHtml(rejectTitle)}">${escapeHtml(rejectLabel)}</button>
     <button class="${file.reviewed ? 'on' : ''}" data-cmd="mark" title="${escapeHtml(t('btnMarkTitle'))}">${file.reviewed ? escapeHtml(t('btnUnmark')) : escapeHtml(t('btnMark'))}</button>
     <button class="secondary" data-cmd="next" title="${t('nextTitle')}">${t('next')}</button>
-    <button class="secondary" data-cmd="blockFile" title="${t('blockFileTitle')}">${t('blockFile')}</button>
     <button class="secondary" data-cmd="refresh" title="${t('refreshTitle')}">${t('refresh')}</button>
     <span class="tip">${t('tip')}</span>
   </div>
@@ -717,8 +719,15 @@ function buildHtml(ctx) {
     ctxEl.style.top = Math.max(4, py) + 'px';
   }
   document.addEventListener('contextmenu', (e) => {
-    // 行内编辑时保留浏览器默认菜单（复制/粘贴），其余位置弹出我们的菜单
-    if (e.target.closest && e.target.closest('.tx.ed')) { return; }
+    // 只有在「已经选中了文本」时才放行系统菜单（方便右键复制）。
+    // 注意：diff 正文的上下文行/新增行全都是可编辑的 .tx.ed，之前「命中 .tx.ed 就放行」
+    // 会让面板绝大部分区域都弹系统菜单，用户根本看不到我们自己的菜单项。
+    let hasSel = false;
+    try {
+      const sel = window.getSelection && window.getSelection();
+      hasSel = !!(sel && String(sel.toString() || '').trim().length);
+    } catch (err) { hasSel = false; }
+    if (hasSel) { return; }
     e.preventDefault();
     showCtx(e.clientX, e.clientY);
   });
@@ -784,7 +793,14 @@ class ReviewPanel {
         retainContextWhenHidden: false
       }
     );
-    this.panel.onDidDispose(() => { this.panel = null; });
+    this.panel.onDidDispose(() => {
+      this.panel = null;
+      this.entry = null;
+      // 面板关了 = 审查结束：让扩展侧清掉树上的「审查中」标记
+      if (this.handlers.panelDisposed) {
+        try { this.handlers.panelDisposed(); } catch (e) { /* ignore */ }
+      }
+    });
     this.panel.webview.onDidReceiveMessage((msg) => this.onMessage(msg));
     return this.panel;
   }
@@ -801,11 +817,11 @@ class ReviewPanel {
         case 'edit': await this.handlers.openInEditor(this.entry, msg.line); break;
         case 'next': await this.handlers.next(this.entry); break;
         case 'refresh': await this.handlers.refresh(); break;
-        case 'blockFile': await this.handlers.blockFile(this.entry); break;
         case 'ctxCmd': await this.handlers.ctxCmd(this.entry, msg.cmd); break;
         case 'hunkAccept': await this.handlers.acceptHunk(this.entry, msg.index, msg.sig); break;
         case 'hunkReject': await this.handlers.rejectHunk(this.entry, msg.index, msg.sig); break;
         case 'hunkUnreject': await this.handlers.unrejectHunk(this.entry, msg.index, msg.sig); break;
+        case 'hunkUnaccept': await this.handlers.unacceptHunk(this.entry, msg.index, msg.sig); break;
         case 'editLine': await this.handlers.editLine(this.entry, msg.line, msg.text, msg.insertBelow, msg.keepFocus ? msg.line : undefined, { tail: msg.tail }); break;
         case 'insertLine': await this.handlers.insertLine(this.entry, msg.line); break;
         case 'insertAbove': await this.handlers.insertAbove(this.entry, msg.line); break;

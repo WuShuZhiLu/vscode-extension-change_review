@@ -1,0 +1,38 @@
+name: Release
+
+# 打 tag 即发版：自动打包 vsix + 源码包，并作为 Release 资产上传。
+# 版本号以 package.json 为准，且必须与 tag 一致（tag 可写 v0.5.0-pre 或 0.5.0-pre）。
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+
+permissions:
+  contents: write # 创建 Release / 上传资产需要
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 跑测试（打包前先确认没坏）
+        run: |
+          node tools/selfcheck.js
+          node tools/mockcheck.js
+          node tools/vcscheck.js
+
+      - name: 打包并发布（vsix + 源码包）
+        run: node tools/release.js --upload
+        env:
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_API_URL: ${{ github.api_url }}

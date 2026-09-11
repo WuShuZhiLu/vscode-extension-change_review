@@ -250,7 +250,10 @@ async function setReviewed(entry, value, opts) {
   if (!entry) { return; }
   const root = entry.source.root;
   const provider = entry.source.provider;
-  const stageGit = !!(opts && opts.stageGit) && provider && provider.id === 'git';
+  // git 工程：标记为已审查 = 加入暂存区（git add）。这是既定行为——
+  // 「接受全部 / 标记为已审查 / 块都处理完自动打钩 / 树上打勾」都必须走这一步，
+  // 只有调用方显式传 { stageGit: false } 才跳过。
+  const stageGit = !!(provider && provider.id === 'git') && !(opts && opts.stageGit === false);
   let appliedRejects = 0;
   if (value) {
     // 标记已审查前，先执行该文件所有待执行的拒绝块；失败则不标记，保持状态一致
@@ -280,10 +283,27 @@ async function setReviewed(entry, value, opts) {
     // 用还原后的新 hash 记录，保证"部分拒绝部分接受"的文件标记稳定
     const hash = appliedRejects > 0 ? await freshFileHash(entry) : entry.file.hash;
     await store.setReviewed(root, entry.file.relPath, hash);
+    await store.clearAutoMarkOff(root, entry.file.relPath); // 明确标记了 → 解除自动标记抑制
   } else {
     await store.clearReviewed(root, entry.file.relPath);
+    // 手动取消审查 = 用户要自己接着操作：抑制「块都决定了就自动打钩」，
+    // 否则下一次刷新/对账会立刻把钩打回来（用户根本没法进入修改流程）。
+    // 抑制按当前指纹记录 —— 文件一改，指纹变化，自动打钩恢复正常。
+    await store.setAutoMarkOff(root, entry.file.relPath, entry.file.hash);
+    log(`已取消审查 ${entry.file.relPath}：暂停自动标记（文件再次改动后恢复）`);
   }
   entry.file.reviewed = value;
+  return true;
+}
+
+/**
+ * 标记完一个文件后自动跳到下一个待审查（用户的期望：标完就走，不用自己找）。
+ * 没有下一个时 nextUnreviewed 会给出「全部审查完毕」的提示，所以直接复用即可。
+ */
+async function advanceAfterReviewed(entry) {
+  if (!entry || !entry.file.reviewed) { return; }
+  log(`[next] ${entry.file.relPath} 已标记，自动跳到下一个待审查`);
+  await nextUnreviewed(entry);
 }
 
 /**
@@ -421,6 +441,8 @@ async function doRefresh(force) {
     }
 
     model.sources = sources;
+    // 「审查中」标记重新挂到新的 source 对象上（source 每次刷新都重建）
+    reapplyActiveFile(sources);
     model.flat = [];
     for (const s of sources) {
       for (const f of s.files) { model.flat.push({ source: s, file: f }); }
@@ -614,7 +636,7 @@ async function openFileForEdit(entry, line) {
 async function editLineInFile(entry, lineNo, text, insertBelow, focusLine, opts) {
   pushSnapshot(entry);
   const abs = entry.file.absPath;
-  const tail = opts && typeof opts.tail === 'string' ? opts.tail : null; // Enter 在行中间：光标后半截成为下一行
+  const tail = opts && typeof opts.tail === 'string' ? opts.tail : ''; // Enter 在行中间：光标后半截成为下一行
   if (!abs || !fs.existsSync(abs)) {
     vscode.window.showWarningMessage('该文件当前不存在（可能已被删除），无法写入修改。');
     return;
@@ -914,14 +936,43 @@ async function retryPendingReveal(tries = 12) {
   if (entry) { await revealInTree(entry, tries); }
 }
 
-/** 在树节点 label 上标记 ▶ 当前正在审查的文件（不依赖 reveal 的视觉高亮，肉眼直接可见） */
+/**
+ * 在树节点上标记当前正在审查的文件（description 里显示「◀ 审查中」）。
+ * 注意：这个状态必须跨刷新保持。source 对象在每次全量刷新时都会重建，
+ * 如果只挂在 source 上，自动刷新（默认 5s）/手动刷新/保存文件触发的刷新都会把标记清掉 ——
+ * 表现就是「提示自己消失了，可用户其实还在审这个文件」。所以这里存模块级引用，刷新时重新挂回去。
+ */
+let activeFileRef = null; // { root, relPath } | null
+
 function setActiveFile(entry) {
   if (!entry || !entry.source) { return; }
   const af = { root: entry.source.root, relPath: entry.file.relPath };
-  const src = entry.source;
-  if (src.activeFile && src.activeFile.root === af.root && src.activeFile.relPath === af.relPath) { return; }
-  src.activeFile = af;
-  provider.refresh(); // 树重渲染，▶ 标记移到新文件上
+  const same = activeFileRef
+    && platform.normalizeForCompare(activeFileRef.root) === platform.normalizeForCompare(af.root)
+    && platform.toGitPath(activeFileRef.relPath) === platform.toGitPath(af.relPath);
+  activeFileRef = af;
+  entry.source.activeFile = af;
+  if (!same) { provider.refresh(); } // 换了文件才需要重渲染树
+}
+
+/** 审查结束（面板被关掉）：清掉「审查中」标记 */
+function clearActiveFile() {
+  if (!activeFileRef) { return; }
+  activeFileRef = null;
+  for (const s of model.sources) { s.activeFile = null; }
+  provider.refresh();
+}
+
+/** 全量刷新后把「审查中」标记重新挂到对应的新 source 对象上 */
+function reapplyActiveFile(sources) {
+  if (!activeFileRef) { return; }
+  const root = platform.normalizeForCompare(activeFileRef.root);
+  const rel = platform.toGitPath(activeFileRef.relPath);
+  const hit = sources.find((s) => platform.normalizeForCompare(s.root) === root);
+  if (!hit) { activeFileRef = null; return; } // 来源没了（仓库被移除等），标记一并清掉
+  const stillThere = hit.files.some((f) => platform.toGitPath(f.relPath) === rel);
+  if (!stillThere) { activeFileRef = null; return; } // 文件已不在列表（审查完/被排除），标记清掉
+  hit.activeFile = activeFileRef;
 }
 
 async function nextUnreviewed(entry) {
@@ -1018,7 +1069,7 @@ async function blockFile(entry) {
   }
   if (!gone) {
     // 写进去了但列表里还在：把真实原因记到日志，别让用户只看到「没生效」
-    log(`[blockFile] 警告：规则已写入，但 ${entry.file.relPath} 仍在列表中（规则=${rel}，基准=${baseNote}）`);
+    log(`[blockFile] 警告：规则已写入，但 ${entry.file.relPath} 仍在列表中（规则=${rel}，基准=${target.uri.fsPath}）`);
   }
   // 屏蔽后当前文件已不在列表 → 自动跳下一个待审查，不留在空面板
   if (gone) {
@@ -1038,6 +1089,7 @@ const handlers = {
   acceptHunk: async (entry, index, sig) => { await acceptHunk(entry, index, sig); },
   rejectHunk: async (entry, index, sig) => { await rejectHunk(entry, index, sig); },
   unrejectHunk: async (entry, index, sig) => { await unrejectHunk(entry, index, sig); },
+  unacceptHunk: async (entry, index, sig) => { await unacceptHunk(entry, index, sig); },
   toggleReviewed: async (entry) => {
     // 面板里的「标记已审查 / 取消」= git 暂存的显式入口：勾上 add、取消 reset
     const value = !entry.file.reviewed;
@@ -1054,6 +1106,8 @@ const handlers = {
     }
     if (value && entry) { await revealInTree(entry, 6); } // 打钩后文件会下移，高亮跟着走
     if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
+    // 打钩之后自动去下一个待审查
+    if (value) { await advanceAfterReviewed(entry); }
   },
   openInEditor: async (entry, line) => { await openBaseDiff(entry, line); },
   editLine: async (entry, line, text, insertBelow, focusLine, opts) => { await editLineInFile(entry, line, text, insertBelow, focusLine, opts); },
@@ -1073,7 +1127,7 @@ const handlers = {
     catch (e) { log(`写剪贴板失败：${e.message}`); }
   },
   next: async (entry) => { await nextUnreviewed(entry); },
-  blockFile: async (entry) => { await blockFile(entry); },
+  panelDisposed: () => { clearActiveFile(); },
   ctxCmd: async (entry, cmd) => {
     switch (cmd) {
       case 'openDiff': await openBaseDiff(entry); break;
@@ -1139,48 +1193,108 @@ async function refreshSingleEntry(entry) {
 }
 
 /**
- * 接受全部：只把文件标记已审查，不 git add / 不改文件内容。
- * （0.4.5 语义：接受=对文件层面的判断；暂存只发生在显式「标记已审查」打勾时）
+ * 把该文件当前所有改动块一次性记为「已接受」。
+ * 用于「接受全部」：文件打了钩，块级状态也得跟上，
+ * 否则取消审查后所有块又变回待审查（用户反馈的 bug）。
+ * 返回记下的块数。
+ */
+async function markAllHunksAccepted(entry) {
+  try {
+    const t = await entry.source.provider.getDiff(entry.file, cfg().get('contextLines', 3));
+    const parsed = parseDiff(t)[0];
+    const hunks = parsed ? parsed.hunks : [];
+    const root = entry.source.root;
+    const rel = entry.file.relPath;
+    for (const h of hunks) {
+      const sig = hunkSignature(h);
+      await store.setHunkReviewed(root, rel, sig, true);
+      await store.setHunkRejected(root, rel, sig, false);
+    }
+    log(`[acceptAll] ${rel} 已把 ${hunks.length} 个改动块记为已接受`);
+    return hunks.length;
+  } catch (e) {
+    log(`[acceptAll] ${entry.file.relPath} 标记改动块失败：${e.message}`);
+    return 0;
+  }
+}
+
+/** 把该文件当前所有改动块一次性记为「已拒绝」 */
+async function markAllHunksRejected(entry) {
+  try {
+    const t = await entry.source.provider.getDiff(entry.file, cfg().get('contextLines', 3));
+    const parsed = parseDiff(t)[0];
+    const hunks = parsed ? parsed.hunks : [];
+    const root = entry.source.root;
+    const rel = entry.file.relPath;
+    for (const h of hunks) {
+      const sig = hunkSignature(h);
+      await store.setHunkRejected(root, rel, sig, true);
+      await store.setHunkReviewed(root, rel, sig, false);
+    }
+    log(`[rejectAll] ${rel} 已把 ${hunks.length} 个改动块记为已拒绝`);
+    return hunks.length;
+  } catch (e) {
+    log(`[rejectAll] ${entry.file.relPath} 标记改动块失败：${e.message}`);
+    return 0;
+  }
+}
+
+/** 清掉该文件的块级决定（文件被整体还原/删除后这些记录就没意义了） */
+async function clearHunkDecisions(entry) {
+  try {
+    await store.clearRejectedHunks(entry.source.root, entry.file.relPath);
+    const acc = store.getReviewedHunks(entry.source.root, entry.file.relPath);
+    for (const sig of Object.keys(acc)) {
+      await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, false);
+    }
+  } catch (e) {
+    log(`[clearHunks] ${entry.file.relPath} 清理块级决定失败：${e.message}`);
+  }
+}
+
+/**
+ * 接受全部：把文件标记已审查，并把当前所有改动块记为已接受。
+ * 不 git add / 不改文件内容（0.4.5 语义：接受=判断；暂存只发生在显式打勾时）
+ */
+/**
+ * 接受全部：记录所有块为已接受，随后自动标记已审查（执行统一发生在标记那一刻：git add）。
  */
 async function acceptFile(entry) {
   const p = entry.source.provider;
-  await setReviewed(entry, true);
-  provider.refresh();
-  updateBadges();
-  await revealInTree(entry, 6); // 接受后同样保持列表高亮跟随
-  if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.showInformationMessage(`已接受 ${entry.file.relPath}（仅标记已审查，未改动${p.id === 'git' ? '暂存区' : '文件'}）`);
+  const n = await markAllHunksAccepted(entry);
+  // 所有块都有决定了 → 立即走自动标记（= 用户语义：处理完就标记；git add 在标记那一刻发生）
+  await store.clearAutoMarkOff(entry.source.root, entry.file.relPath);
+  log(`[acceptAll] ${entry.file.relPath} 已记录接受全部（${n} 块），自动标记已审查`);
+  const marked = await autoMarkWhenAllHunksDone(entry);
+  if (!marked) {
+    await revealInTree(entry, 6);
+    if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
+    else { provider.refresh(); }
+    updateBadges();
+    vscode.window.showInformationMessage(`已接受 ${entry.file.relPath} 的全部改动`);
+  }
 }
 
+/**
+ * 拒绝全部：**只记录决定**，不改文件、不标记已审查。
+ * 还原（含未跟踪文件删除）推迟到「标记为已审查」时由 applyPendingRejects 执行。
+ */
 async function rejectFile(entry) {
   const p = entry.source.provider;
   const kind = entry.file.kind;
-  const answer = await vscode.window.showWarningMessage(
-    kind === 'untracked' || (p.id === 'snapshot' && kind === 'untracked')
-      ? `确定删除新增文件 ${entry.file.relPath} 吗？此操作不可撤销。`
-      : `确定放弃 ${entry.file.relPath} 的全部改动并还原到${p.baseLabel}吗？此操作不可撤销。`,
-    { modal: true },
-    '拒绝改动'
-  );
-  if (answer !== '拒绝改动') { return; }
-  try {
-    const res = await p.rejectFile(entry.file);
-    log(`拒绝 ${entry.file.relPath}: ${res.message || ''}`);
-  } catch (e) {
-    const msg = `还原 ${entry.file.relPath} 失败：${e.message}`;
-    log(msg);
-    showErr(msg);
-    return;
+  const isNew = kind === 'untracked' || kind === 'added';
+  const n = await markAllHunksRejected(entry);
+  // 所有块都有决定了 → 立即走自动标记（还原在标记那一刻执行）
+  await store.clearAutoMarkOff(entry.source.root, entry.file.relPath);
+  log(`[rejectAll] ${entry.file.relPath} 已记录拒绝全部（${n} 块），自动标记已审查`);
+  const marked = await autoMarkWhenAllHunksDone(entry);
+  if (!marked) {
+    await revealInTree(entry, 6);
+    if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
+    else { provider.refresh(); }
+    updateBadges();
+    vscode.window.showInformationMessage(`已拒绝 ${entry.file.relPath} 的全部改动`);
   }
-  const wasPanelFile = !!(panel && panel.entry && sameEntry(panel.entry, entry));
-  // 拒绝全部 = 内容已执行 → 自动标记已审查（文件随后会从改动列表消失）
-  await setReviewed(entry, true);
-  const didFull = await refreshSingleEntry(entry);
-  // 单文件路径已由 refreshSingleEntry 处理面板；全量路径在此补“当前文件整个被还原 → 跳下一个”
-  if (didFull && wasPanelFile && !findEntry(entry.source.root, entry.file.relPath)) {
-    await nextUnreviewed(null);
-  }
-  vscode.window.showInformationMessage(`已还原 ${entry.file.relPath}（自动标记已审查）`);
 }
 
 /** 校验点击的块与当前 diff 是否一致（文件被编辑过时索引会漂移） */
@@ -1201,6 +1315,8 @@ async function rejectHunk(entry, index, sig) {
   // 之前随时可以撤销拒绝（反悔机会）
   await store.setHunkRejected(entry.source.root, entry.file.relPath, sig, true);
   await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, false); // 从已接受表移除（若之前接受过）
+  // 用户又开始动手处理块了 → 解除「手动取消审查」的自动标记抑制（否则处理完了也不会自动打钩）
+  await store.clearAutoMarkOff(entry.source.root, entry.file.relPath);
   log(`已记录拒绝 ${entry.file.relPath} 第 ${index + 1} 块 (sig=${sig})，标记已审查时执行还原`);
   await autoMarkWhenAllHunksDone(entry);
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
@@ -1214,9 +1330,19 @@ async function unrejectHunk(entry, index, sig) {
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
 }
 
+/** 取消某个块的「已接受」决定（和「撤销拒绝」对称；取消后该块回到"待审查"） */
+async function unacceptHunk(entry, index, sig) {
+  await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, false);
+  log(`已取消接受 ${entry.file.relPath} 第 ${index + 1} 块`);
+  if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
+  vscode.window.setStatusBarMessage(`已取消接受 ${entry.file.relPath} 第 ${index + 1} 个改动块`, 3000);
+}
+
 /**
- * 执行某文件所有待执行的拒绝块（标记已审查时调用）。
+ * 执行某文件所有待执行的拒绝块（**只在标记为已审查时调用**）。
  * 从最后一个块往前还原，避免 index 漂移。
+ * 「全部块都被拒绝」= 整文件放弃 → 交给 provider 的整文件还原
+ * （未跟踪/新增文件会被删除，逐块还原做不到这一点）。
  * 返回实际还原的块数；-1 表示执行失败（调用方不应继续标记）。
  */
 async function applyPendingRejects(entry) {
@@ -1228,6 +1354,16 @@ async function applyPendingRejects(entry) {
     const t = await p.getDiff(entry.file, cfg().get('contextLines', 3));
     const parsed = parseDiff(t)[0];
     const hunks = parsed ? parsed.hunks : [];
+    const allRejected = hunks.length > 0 && hunks.every((h) => table[hunkSignature(h)]);
+    if (allRejected) {
+      const res = await p.rejectFile(entry.file);
+      await store.clearRejectedHunks(entry.source.root, entry.file.relPath);
+      await clearHunkDecisions(entry);
+      const msg = `已执行 ${entry.file.relPath} 的整文件拒绝（${hunks.length} 块全被拒绝）`;
+      log(msg);
+      vscode.window.setStatusBarMessage(msg, 3000);
+      return hunks.length;
+    }
     let applied = 0;
     for (let i = hunks.length - 1; i >= 0; i -= 1) {
       const s = hunkSignature(hunks[i]);
@@ -1276,6 +1412,8 @@ async function acceptHunk(entry, index, sig) {
   }
   await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, true);
   await store.setHunkRejected(entry.source.root, entry.file.relPath, sig, false); // 改主意：从拒绝表移除
+  // 用户又开始动手处理块了 → 解除「手动取消审查」的自动标记抑制（否则处理完了也不会自动打钩）
+  await store.clearAutoMarkOff(entry.source.root, entry.file.relPath);
   log(`已接受 ${entry.file.relPath} 第 ${index + 1} 块 (sig=${sig})`);
   // 接受只动暂存区/标记，工作区内容没变：不需要整表重扫
   await autoMarkWhenAllHunksDone(entry);
@@ -1283,39 +1421,45 @@ async function acceptHunk(entry, index, sig) {
   vscode.window.setStatusBarMessage(`已接受 ${entry.file.relPath} 第 ${index + 1} 个改动块`, 3000);
 }
 
-/** 一个文件的所有改动块都有决定（接受或拒绝）→ 自动标记已审查（拒绝块在此刻执行还原） */
+/** 一个文件的所有改动块都有决定（接受或拒绝）→ 自动标记已审查（拒绝块在此刻执行还原）。返回是否真的标记了 */
 async function autoMarkWhenAllHunksDone(entry) {
   const fresh = findEntry(entry.source.root, entry.file.relPath);
-  if (!fresh || fresh.file.reviewed) { return; }
+  if (!fresh || fresh.file.reviewed) { return false; }
+  if (store.isAutoMarkOff(fresh.source.root, fresh.file.relPath, fresh.file.hash)) {
+    log(`[autoMark] ${fresh.file.relPath} 已被手动取消审查，暂停自动标记（文件改动后恢复）`);
+    return false;
+  }
   try {
     const t = await fresh.source.provider.getDiff(fresh.file, cfg().get('contextLines', 3));
     const parsed = parseDiff(t)[0];
     const hunks = parsed ? parsed.hunks : [];
     if (!hunks.length) {
       log(`[autoMark] ${fresh.file.relPath} 当前解析不到改动块，跳过自动标记`);
-      return;
+      return false;
     }
     const acc = store.getReviewedHunks(fresh.source.root, fresh.file.relPath);
     const rej = store.getRejectedHunks(fresh.source.root, fresh.file.relPath);
     const pending = hunks.filter((h) => { const s = hunkSignature(h); return !(acc[s] || rej[s]); });
     if (pending.length) {
       log(`[autoMark] ${fresh.file.relPath} 还有 ${pending.length}/${hunks.length} 个块未决定，暂不标记`);
-      return;
+      return false;
     }
     await setReviewed(fresh, true); // 内部会执行所有待执行的拒绝块（还原）
     await refreshSingleEntry(fresh); // 拒绝执行后文件可能已无差异 → 从列表移除
     provider.refresh();
     updateBadges();
     log(`${fresh.file.relPath} 全部改动块已决定（接受/拒绝），自动标记已审查`);
-    // 文件已无差异 → 自动跳到下一个待审查，不留在"没有差异"的空面板
-    if (!findEntry(fresh.source.root, fresh.file.relPath)) {
-      log(`${fresh.file.relPath} 已无差异，自动跳到下一个待审查`);
-      await nextUnreviewed(null);
+    // 标记完就自动去下一个待审查：文件已无差异的情况 refreshSingleEntry 已经跳过了，
+    // 这里处理"文件还在列表里（改动都接受了）"的情况。
+    if (findEntry(fresh.source.root, fresh.file.relPath)) {
+      await advanceAfterReviewed(fresh);
     } else if (panel && panel.entry && sameEntry(panel.entry, fresh)) {
       await panel.reload();
     }
+    return true;
   } catch (e) {
     log(`自动打钩检查失败：${e.message}`);
+    return false;
   }
 }
 
@@ -1334,6 +1478,8 @@ async function reconcileDecidedFiles() {
       if (e.file.reviewed) { continue; }
       const root = e.source.root;
       const rel = e.file.relPath;
+      // 用户手动取消审查过（且文件还没再改）→ 尊重用户，不要自动打回去
+      if (store.isAutoMarkOff(root, rel, e.file.hash)) { continue; }
       const acc = store.getReviewedHunks(root, rel);
       const rej = store.getRejectedHunks(root, rel);
       if (!Object.keys(acc).length && !Object.keys(rej).length) { continue; } // 没块决定，跳过
@@ -1588,10 +1734,15 @@ async function activate(context) {
   register('changeReview.markReviewed', async (arg) => {
     const entry = resolveArg(arg);
     if (!entry) { return; }
-    await setReviewed(entry, true);
+    await setReviewed(entry, true); // 这一步才执行：还原被拒绝的块/文件 + git add
+    // 拒绝块执行后文件可能已无差异 → 单文件复查把它移出列表（内部也会处理面板）
+    await refreshSingleEntry(entry);
     provider.refresh();
     updateBadges();
     vscode.window.setStatusBarMessage(`已标记 ${entry.file.relPath} 为已审查`, 3000);
+    if (!findEntry(entry.source.root, entry.file.relPath)) { return; } // 已无差异，refreshSingleEntry 已跳下一个
+    if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
+    await advanceAfterReviewed(entry);
   });
   register('changeReview.unmarkReviewed', async (arg) => {
     const entry = resolveArg(arg);
@@ -1606,16 +1757,14 @@ async function activate(context) {
       vscode.window.showInformationMessage('当前没有待审查的改动');
       return;
     }
-    await store.markAll(model.flat);
-    for (const e of model.flat) { e.file.reviewed = true; }
+    // 走 setReviewed：git 工程随标记执行 git add（与核心规则一致），拒绝块在此刻还原
+    for (const e of model.flat.slice()) { await setReviewed(e, true); }
     provider.refresh();
     updateBadges();
     vscode.window.setStatusBarMessage(`已把 ${model.flat.length} 个文件标记已审查`, 3000);
   });
   register('changeReview.clearReviewed', async () => {
-    await store.clearAll();
-    // 内容没变，只是标记清了：直接改内存状态 + 刷新树，不做全量重扫
-    for (const e of model.flat) { e.file.reviewed = false; }
+    for (const e of model.flat.slice()) { await setReviewed(e, false); }
     provider.refresh();
     updateBadges();
     vscode.window.setStatusBarMessage('已清除所有审查标记', 3000);

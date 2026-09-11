@@ -4,5 +4,4 @@
 .reasonix/
 .trae/
 .claudecode/
-
-*.vsix
+dist/
