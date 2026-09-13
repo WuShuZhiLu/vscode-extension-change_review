@@ -239,23 +239,79 @@ function installLocal(vsixPath) {
 
 // ---------------------------------------------------------------- 上传 Release
 function apiBase() {
-  let api = String(process.env.RELEASE_API_URL || process.env.GITHUB_API_URL || '').replace(/\/+$/, '');
+  let api = String(process.env.RELEASE_PUBLIC_URL || process.env.RELEASE_API_URL || process.env.GITHUB_API_URL || '').replace(/\/+$/, '');
   if (!api) {
     const server = String(process.env.GITHUB_SERVER_URL || '').replace(/\/+$/, '');
-    if (!server) { throw new Error('缺少 RELEASE_API_URL / GITHUB_API_URL，无法上传'); }
+    if (!server) { throw new Error('缺少 RELEASE_PUBLIC_URL / RELEASE_API_URL / GITHUB_API_URL，无法上传'); }
     api = `${server}/api/v1`;
   }
   let host = '';
-  try { host = new URL(api).host; } catch (e) { throw new Error(`API 地址不合法：${api}`); }
+  // 用 hostname（不带端口）：下面判断 api.github.com 时不受 :443 之类干扰
+  try { host = new URL(api).hostname; } catch (e) { throw new Error(`API 地址不合法：${api}`); }
   // GitHub 的 API 根就是 api.github.com；Gitea 需要 /api/v1 前缀
   if (!/github\.com$/i.test(host) && !/\/api\/v1$/i.test(api)) { api += '/api/v1'; }
   return api;
 }
 
+/** undici 的 fetch 只会抛「TypeError: fetch failed」，真实原因藏在 e.cause 链里，这里挖出来 */
+function describeFetchError(err) {
+  const parts = [];
+  for (let e = err, depth = 0; e && depth < 5; e = e.cause, depth += 1) {
+    const code = e.code || e.errno;
+    parts.push([e.name || 'Error', code ? `(${code})` : '', e.message || ''].filter(Boolean).join(' '));
+  }
+  return parts.join(' ← ');
+}
+
+/**
+ * 连不上时补一圈旁证：DNS 能否解析、端口通不通、有没有代理拦截。
+ * 自建 runner 与 Gitea 是否同处一个 docker 网络，光看「fetch failed」判断不了。
+ */
+async function diagnoseConnectivity(url) {
+  const net = require('net');
+  const out = [];
+  let u;
+  try { u = new URL(url); } catch (e) { return [`  地址解析失败：${url}`]; }
+  const host = u.hostname;
+  const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+
+  out.push(`  目标：${u.protocol}//${host}:${port}`);
+  out.push(`  注入变量：GITHUB_API_URL=${process.env.GITHUB_API_URL || '(空)'}  GITHUB_SERVER_URL=${process.env.GITHUB_SERVER_URL || '(空)'}`);
+
+  let addrs;
+  try {
+    addrs = await require('dns').promises.lookup(host, { all: true });
+  } catch (e) {
+    out.push(`  DNS：解析失败（${e.code || e.message}）—— runner 与「${host}」可能不在同一 docker 网络`);
+    return out;
+  }
+  out.push(`  DNS：可解析 → ${addrs.map((a) => a.address).join(', ')}`);
+
+  await new Promise((resolve) => {
+    const sock = net.connect({ host, port });
+    const done = (msg) => { out.push(`  TCP ${port}：${msg}`); sock.destroy(); resolve(); };
+    sock.setTimeout(4000);
+    sock.on('connect', () => done('可连接'));
+    sock.on('timeout', () => done('连接超时'));
+    sock.on('error', (e) => done(`连接失败（${e.code || e.message}）`));
+  });
+
+  const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+  if (proxy) { out.push(`  代理：${proxy}（若拦了内网请求，可设 NO_PROXY=${host}）`); }
+  return out;
+}
+
 async function api(method, url, token, body, extraHeaders, raw) {
   const headers = Object.assign({ Authorization: `token ${token}`, 'User-Agent': 'change-review-release' }, extraHeaders || {});
   if (body && !raw) { headers['Content-Type'] = 'application/json'; }
-  const res = await fetch(url, { method, headers, body: body ? (raw ? body : JSON.stringify(body)) : undefined });
+  let res;
+  try {
+    res = await fetch(url, { method, headers, body: body ? (raw ? body : JSON.stringify(body)) : undefined });
+  } catch (e) {
+    let diag = [];
+    try { diag = await diagnoseConnectivity(url); } catch (err) { /* 诊断失败不影响主错误 */ }
+    throw new Error([`${method} ${url} 网络请求失败：${describeFetchError(e)}`, ...diag].join('\n'));
+  }
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch (e) { /* 非 JSON */ }
@@ -293,15 +349,18 @@ async function upload() {
   console.log(`[release] 创建 Release ${tag}（prerelease=${prerelease}）…`);
   let res = await api('POST', `${base}/repos/${repo}/releases`, token, payload);
   let release = res.json;
-  let flavor = 'gitea';
-  if (res.ok && release && release.upload_url) { flavor = 'github'; }
+  // 只认真正的 GitHub。不能靠「响应里有没有 upload_url」判断：Gitea 的 Release JSON
+  // 同样带 upload_url，而那里的 host 是 Gitea 的 ROOT_URL（可能配成公网地址，runner 连不上）。
+  // 用 base 的主机名判断；Gitea 一律走自己的 asset API（拼 ${base}，不用服务端返回的 URL）。
+  let isGithub = false;
+  try { isGithub = /(^|\.)github\.com$/i.test(new URL(base).hostname); } catch (e) { /* 保持 false */ }
+  const flavor = isGithub ? 'github' : 'gitea';
   if (!res.ok) {
     // 已经存在（重跑 CI）→ 取回来复用
     if (res.status === 422 || res.status === 409) {
       const got = await api('GET', `${base}/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`, token);
       if (!got.ok) { throw new Error(`Release 已存在但读取失败：${got.status} ${got.text.slice(0, 300)}`); }
       release = got.json;
-      flavor = release.upload_url ? 'github' : 'gitea';
       console.log('[release] Release 已存在，改为覆盖资产');
     } else {
       throw new Error(`创建 Release 失败：${res.status} ${res.text.slice(0, 400)}`);
@@ -325,6 +384,7 @@ async function upload() {
     const url = flavor === 'github'
       ? `${String(release.upload_url).replace(/\{.*$/, '')}?name=${encodeURIComponent(a.name)}`
       : `${base}/repos/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(a.name)}`;
+    console.log(`[release] 上传 ${a.name} → ${url.replace(/\?.*$/, '')}（flavor=${flavor}）`);
     const up = await api('POST', url, token, data, { 'Content-Type': a.type, 'Content-Length': data.length }, true);
     if (!up.ok) { throw new Error(`上传 ${a.name} 失败：${up.status} ${up.text.slice(0, 300)}`); }
     console.log(`[release] 已上传 ${a.name}（${(data.length / 1024).toFixed(1)} KB）`);

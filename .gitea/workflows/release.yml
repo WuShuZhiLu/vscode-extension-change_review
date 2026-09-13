@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: http://gitea_latest:3000/actions/checkout@v4
 
       - name: 准备 Node.js
         run: |
@@ -28,6 +28,18 @@ jobs:
             exit 1
           fi
           node -v
+
+      - name: 准备 SVN 命令行工具（可选）
+        # 缺 svn/svnadmin 时 vcscheck 会自动跳过 SVN 相关段（不判失败），
+        # 这里只是尽力装上，让有条件的 runner 真正跑一遍 SVN provider。
+        run: |
+          if command -v svn >/dev/null 2>&1 && command -v svnadmin >/dev/null 2>&1; then
+            echo "已存在 svn / svnadmin"
+          elif command -v apt-get >/dev/null 2>&1; then
+            (sudo apt-get update -qq && sudo apt-get install -y -qq subversion) || echo "未装上 subversion，vcscheck 将跳过 SVN 段"
+          else
+            echo "无 apt-get，vcscheck 将跳过 SVN 段"
+          fi
 
       - name: 跑测试（打包前先确认没坏）
         run: |
@@ -41,5 +53,6 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-          # Gitea 若没提供 api_url，脚本会回落到 GITHUB_API_URL / GITHUB_SERVER_URL + /api/v1
+          # runner 与 Gitea 同处一个 docker 网络，直接用 Gitea 注入的 api_url
+          # （http://gitea_latest:3000/api/v1）。地址一律不写进本文件（会同步到公开仓库）。
           RELEASE_API_URL: ${{ github.api_url }}

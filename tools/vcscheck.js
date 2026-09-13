@@ -16,11 +16,28 @@ const { diffOps, revertHunkInText } = require('../src/diffEngine');
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
 function check(name, cond, extra) {
   if (cond) { pass += 1; console.log(`  ✓ ${name}`); } else {
     fail += 1;
     console.log(`  ✗ ${name}${extra !== undefined ? '  ->  ' + extra : ''}`);
   }
+}
+
+/** 探测命令行工具是否可用（跑 --version 能成功即可） */
+function hasBin(name) {
+  try {
+    execFileSync(name, ['--version'], { encoding: 'utf8', stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 跳过一整段（环境缺工具），不计入通过/失败 */
+function skipSection(title, why) {
+  skip += 1;
+  console.log(`\n${title}\n  ⊘ 跳过：${why}`);
 }
 
 function mk(n) {
@@ -541,19 +558,23 @@ async function testSvnCrignoreSubdir(baseDir) {
   fs.mkdirSync(baseDir, { recursive: true });
   try {
     testDiffEngine();
+    // SVN 各段需要真实的 svn / svnadmin。CI 镜像与多数开发机没装 Subversion 命令行工具，
+    // 缺工具时整段跳过（而不是抛 ENOENT 让测试变红）——那是环境问题，不是代码问题。
+    const svnOk = hasBin('svn') && hasBin('svnadmin');
     await testSnapshot(baseDir);
-    await testSvnSubdirScope(baseDir);
-    await testSvnCrignoreSubdir(baseDir);
+    if (svnOk) { await testSvnSubdirScope(baseDir); } else { skipSection('[SVN 子目录范围] 打开的目录不是 svn 根', '未检测到 svn / svnadmin'); }
+    if (svnOk) { await testSvnCrignoreSubdir(baseDir); } else { skipSection('[SVN .crignore 锚定] 打开子目录时 .crignore 规则仍命中', '未检测到 svn / svnadmin'); }
     await testGitSubdirScope(baseDir);
-    await testSvnDetectDepth(baseDir);
-    await testExclude(baseDir);
-    await testSvn(baseDir);
+    if (svnOk) { await testSvnDetectDepth(baseDir); } else { skipSection('[SVN 探测上限] .svn 超过 5 层不接管', '未检测到 svn / svnadmin'); }
+    // testExclude 全程跑在真实 SVN 工作副本上（SvnProvider），同样依赖 svn 工具链
+    if (svnOk) { await testExclude(baseDir); } else { skipSection('[通用 exclude] 用户手动排除规则', '未检测到 svn / svnadmin'); }
+    if (svnOk) { await testSvn(baseDir); } else { skipSection('[SVN] 真实仓库', '未检测到 svn / svnadmin'); }
   } catch (e) {
     fail += 1;
     console.log('\n执行异常:', e && e.stack ? e.stack : e);
   } finally {
     try { fs.rmSync(baseDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
   }
-  console.log(`\n结果：${pass} 通过，${fail} 失败`);
+  console.log(`\n结果：${pass} 通过，${fail} 失败${skip ? `，${skip} 段跳过（缺 svn/svnadmin）` : ''}`);
   process.exit(fail ? 1 : 0);
 })();

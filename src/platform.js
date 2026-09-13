@@ -64,7 +64,10 @@ function svnCandidates() {
 }
 
 function normalizeForCompare(p) {
-  let s = String(p || '').replace(/\\/g, '/');
+  let s = String(p || '');
+  // 只有 Windows 把 '\' 当路径分隔符；POSIX 下 '\' 是合法的文件名字符，
+  // 无条件归一会把 "C:\a\b"（一个文件名）误判成 "C:/a/b"（一个路径）。
+  if (IS_WIN) { s = s.replace(/\\/g, '/'); }
   if (s.length > 1 && s.endsWith('/')) { s = s.slice(0, -1); }
   // Windows / macOS 文件系统默认大小写不敏感，Linux 敏感
   if (IS_WIN || IS_MAC) { s = s.toLowerCase(); }
@@ -82,7 +85,10 @@ function toPosix(p) {
 
 /** git 的 pathspec 永远用正斜杠；仓库内相对路径 */
 function toGitPath(relPath) {
-  return String(relPath || '').split(path.sep).join('/');
+  // 无条件替换，不能用 split(path.sep)：
+  // WSL / Linux 上跑 Windows 版 git 时会拿到 "src\a.js" 这类路径，
+  // 此时 path.sep 是 '/'，split(path.sep) 完全不生效，反斜杠会原样传给 git。
+  return String(relPath || '').replace(/\\/g, '/');
 }
 
 /** 仓库根 + git 相对路径 -> 本机绝对路径 */

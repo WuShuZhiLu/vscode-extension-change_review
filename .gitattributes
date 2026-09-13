@@ -1,0 +1,30 @@
+# 统一行尾规则：仓库内一律 LF，检出到 Windows 时由 Git 按需转换。
+#
+# 背景：本仓库之前没有 .gitattributes，搭配 core.autocrlf=true 时，
+# Linux 侧（LF）与 Windows 侧（CRLF）各提交一次就会互相把整批文件标成
+# modified，git status 出现大量「只差行尾」的噪音文件。
+# text=auto 让 Git 按内容自动判定是否为文本并统一归一化，eol=lf 声明
+# 仓库内的权威行尾，彻底消除这类误报。
+
+* text=auto eol=lf
+
+# Windows 批处理/脚本必须保留 CRLF，否则 cmd.exe、PowerShell 解析会出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件：禁止任何行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.vsix binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# 锁文件不参与 diff 行尾归一（内容本就不该被改）
+package-lock.json -text

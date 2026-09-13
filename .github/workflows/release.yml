@@ -23,6 +23,18 @@ jobs:
         with:
           node-version: '20'
 
+      - name: 准备 SVN 命令行工具（可选）
+        # 缺 svn/svnadmin 时 vcscheck 会自动跳过 SVN 相关段（不判失败），
+        # 这里只是尽力装上，让有条件的 runner 真正跑一遍 SVN provider。
+        run: |
+          if command -v svn >/dev/null 2>&1 && command -v svnadmin >/dev/null 2>&1; then
+            echo "已存在 svn / svnadmin"
+          elif command -v apt-get >/dev/null 2>&1; then
+            (sudo apt-get update -qq && sudo apt-get install -y -qq subversion) || echo "未装上 subversion，vcscheck 将跳过 SVN 段"
+          else
+            echo "无 apt-get，vcscheck 将跳过 SVN 段"
+          fi
+
       - name: 跑测试（打包前先确认没坏）
         run: |
           node tools/selfcheck.js
