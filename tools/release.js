@@ -139,26 +139,44 @@ function collectSource(dir, relBase, out) {
 }
 
 // ---------------------------------------------------------------- Release 说明
+/**
+ * 收集 CHANGELOG 里属于该版本的段落。
+ * 匹配规则：标题等于 version、等于基础版本号、或以「基础版本号-」开头（0.5.0-pre1 等）。
+ * 带额外文字的标题行（如 `## 0.4.6（…）`）只用于结束当前段，不算命中。
+ */
+function collectSections(text, version) {
+  const base = String(version).split('-')[0];
+  const sections = [];
+  let cur = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^##\s+/.test(line)) {
+      if (cur) { sections.push(cur); cur = null; }
+      const m = line.match(/^##\s+(\S+)\s*$/);
+      const title = m ? m[1] : '';
+      if (title === version || title === base || title.startsWith(`${base}-`)) {
+        cur = { title, body: [] };
+      }
+      continue;
+    }
+    if (cur) { cur.body.push(line); }
+  }
+  if (cur) { sections.push(cur); }
+  return sections.filter((s) => s.body.join('').trim());
+}
+
+/**
+ * 取 Release 说明。
+ * 正式发布时把同期 pre 段（0.5.0-pre1 / -pre2 …）一起带上：pre 只是预发布通道，
+ * 多数用户装的还是上一个正式版，pre 期间的变化对他们同样是新变化。
+ */
 function readReleaseNotes(version) {
   for (const file of ['CHANGELOG.md', 'CHANGELOG.en.md']) {
     const p = path.join(ROOT, file);
     if (!fs.existsSync(p)) { continue; }
-    const text = fs.readFileSync(p, 'utf8');
-    const base = String(version).split('-')[0];
-    const lines = text.split(/\r?\n/);
-    let start = -1;
-    for (let i = 0; i < lines.length; i += 1) {
-      const m = lines[i].match(/^##\s+(\S+)\s*$/);
-      if (m && (m[1] === version || m[1] === base)) { start = i + 1; break; }
-    }
-    if (start === -1) { continue; }
-    const body = [];
-    for (let i = start; i < lines.length; i += 1) {
-      if (/^##\s+/.test(lines[i])) { break; }
-      body.push(lines[i]);
-    }
-    const texted = body.join('\n').trim();
-    if (texted) { return texted; }
+    const sections = collectSections(fs.readFileSync(p, 'utf8'), version);
+    if (!sections.length) { continue; }
+    if (sections.length === 1) { return sections[0].body.join('\n').trim(); }
+    return sections.map((s) => `### ${s.title}\n${s.body.join('\n').trim()}`).join('\n\n').trim();
   }
   return `Release ${version}`;
 }

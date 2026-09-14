@@ -2,8 +2,8 @@
   "name": "change-review",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.5.0-pre1",
-  "publisher": "local",
+  "version": "0.5.0",
+  "publisher": "wushuzhilu",
   "license": "MIT",
   "icon": "resources/icon.png",
   "engines": {
@@ -395,5 +395,13 @@
         "when": "focusedView == changeReview.files"
       }
     ]
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wushuzhilu/vscode-extension-change_review.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wushuzhilu/vscode-extension-change_review/issues"
+  },
+  "homepage": "https://github.com/wushuzhilu/vscode-extension-change_review#readme"
 }

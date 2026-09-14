@@ -1,6 +1,8 @@
 'use strict';
 
 const vscode = require('vscode');
+// 轻量 i18n 封装：默认串为英文，译文在 package.nls.*.json；l10n 不可用时回退到默认串（不会崩）
+const t = (id, args) => (vscode.l10n && vscode.l10n.t ? vscode.l10n.t(id, args) : id);
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -233,7 +235,7 @@ function resolveArg(arg, silent = false) {
   if (!entry && panel && panel.entry && panel.panel && panel.panel.visible) { entry = panel.entry; }
   if (!entry && !silent) {
     vscode.window.showWarningMessage(
-      'Change Review：没有找到目标文件。请在改动列表里选中一个文件，或先打开该文件，再执行命令。'
+      t('Change Review: no target file found. Select a file in the changes list, or open the file first, then run the command.')
     );
   }
   return entry;
@@ -340,25 +342,26 @@ async function offerSafeDirectory(root) {
   if (safeDirPrompting) { return; }
   safeDirPrompting = true;
   try {
+    const trustThis = t('Trust this repository');
+    const trustAll = t('Trust all repositories');
     const pick = await vscode.window.showWarningMessage(
-      `git 拒绝访问仓库（dubious ownership）：${root}\n` +
-      '通常是因为仓库目录的所有者与当前用户不一致（WSL 挂载 Windows 目录时很常见）。',
-      '信任该仓库',
-      '信任全部仓库'
+      t('Git refused to access the repository (dubious ownership): {0}\nUsually because the repository owner differs from the current user (common when WSL mounts a Windows directory).', [root]),
+      trustThis,
+      trustAll
     );
-    if (pick === '信任该仓库') {
+    if (pick === trustThis) {
       await require('./gitService').addSafeDirectory(root, false);
-      vscode.window.showInformationMessage(`已把 ${root} 加入 git safe.directory`);
-    } else if (pick === '信任全部仓库') {
+      vscode.window.showInformationMessage(t('Added {0} to git safe.directory', [root]));
+    } else if (pick === trustAll) {
       await require('./gitService').addSafeDirectory(null, true);
-      vscode.window.showInformationMessage('已设置 safe.directory = *');
+      vscode.window.showInformationMessage(t('Set safe.directory = *'));
     } else {
       return;
     }
     require('./gitService').resetGit();
     await doRefresh(true);
   } catch (e) {
-    vscode.window.showErrorMessage(`设置 safe.directory 失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to set safe.directory: {0}', [e.message]));
   } finally {
     safeDirPrompting = false;
   }
@@ -393,13 +396,13 @@ async function doRefresh(force) {
           await offerSafeDirectory(e.dubiousRoot);
         } else if (e && e.noGit) {
           // 探测期就失败：把原因放到面板 + 状态栏，但只展示一次，不刷屏
-          const msg = `未找到可用的 git 可执行文件（${platform.IS_WIN ? 'Windows' : (platform.IS_MAC ? 'macOS' : 'Linux/WSL')}）。请在 VSCode 设置里把 changeReview.gitPath 填成 git 的完整路径。`;
+          const msg = t('No usable git executable found ({0}). Please set changeReview.gitPath to the full path of git in VSCode settings.', [platform.IS_WIN ? 'Windows' : (platform.IS_MAC ? 'macOS' : 'Linux/WSL')]);
           log(`git 不可用：${e.message}`);
-          vscode.window.showWarningMessage(`Change Review：${msg}`, '我知道了');
+          vscode.window.showWarningMessage(t('Change Review: {0}', [msg]), t('Got it'));
           detectionFailures.push({ kind: 'git-missing', message: msg });
         } else {
           log(`探测版本控制失败：${e.message}`);
-          vscode.window.showErrorMessage(`Change Review 探测版本控制失败：${e.message}`);
+          vscode.window.showErrorMessage(t('Change Review failed to detect version control: {0}', [e.message]));
           detectionFailures.push({ kind: 'detect-error', message: e.message });
         }
       }
@@ -477,7 +480,7 @@ async function refreshPanelIfChanged() {
   const fresh = findEntry(old.source.root, old.file.relPath);
   if (!fresh) {
     panel.entry = null;
-    panel.panel.webview.html = '<html><body style="font-family:var(--vscode-font-family);padding:20px">该文件已没有与对比基准的差异。</body></html>';
+    panel.panel.webview.html = '<html><body style="font-family:var(--vscode-font-family);padding:20px">' + t('This file no longer differs from the comparison baseline.') + '</body></html>';
     return;
   }
   const changed = !old.file.hash || !fresh.file.hash || old.file.hash !== fresh.file.hash;
@@ -529,7 +532,7 @@ function updateBadges() {
   const pending = total - done;
 
   treeView.badge = pending > 0
-    ? { value: pending, tooltip: `${pending} 个文件待审查（共 ${total} 项改动）` }
+    ? { value: pending, tooltip: t('{0} files pending review (out of {1} changes)', [pending, total]) }
     : undefined;
 
   const needBaseline = model.sources.filter((s) => s.needBaseline);
@@ -539,15 +542,15 @@ function updateBadges() {
   if (failures.length) {
     // 把探测失败一次性展示在面板顶部（不会反复弹窗）
     const msg = failures[0].message;
-    treeView.message = `⚠ ${msg}`;
+    treeView.message = t('⚠ {0}', [msg]);
   } else if (needBaseline.length && model.sources.length === 1 && needBaseline.length === 1) {
-    treeView.message = '此项目没有 git / svn，请点击「初始化对比基准」建立审查基准';
+    treeView.message = t('This project has no git / svn. Click "Initialize Baseline" to set a review baseline.');
   } else if (total === 0 && kinds) {
-    treeView.message = `没有检测到与${kinds}基准不同的文件`;
+    treeView.message = t('No files differing from the {0} baseline were detected', [kinds]);
   } else if (total === 0 && !kinds) {
-    treeView.message = '没有可识别的来源（既不是 git / svn 仓库，也不是可建立快照的项目）';
+    treeView.message = t('No recognizable source (neither a git / svn repo nor a project that can be snapshotted)');
   } else if (pending === 0) {
-    treeView.message = `全部 ${total} 个文件已审查 ✓`;
+    treeView.message = t('All {0} files reviewed ✓', [total]);
   } else {
     treeView.message = undefined;
   }
@@ -557,12 +560,12 @@ function updateBadges() {
     return;
   }
   statusBar.text = total === 0
-    ? (failures.length ? `$(warning) ${kinds || '未识别到来源'}` : '$(check) 无本地改动')
-    : (pending === 0 ? `$(check-all) ${total} 个文件已审查` : `$(checklist) ${done}/${total} 已审查`);
-  const srcLine = kinds ? `（${kinds}）` : '（未识别到来源）';
+    ? (failures.length ? t('$(warning) {0}', [kinds || 'Unrecognized source']) : t('$(check) No local changes'))
+    : (pending === 0 ? t('$(check-all) {0} files reviewed', [total]) : t('$(checklist) {0}/{1} reviewed', [done, total]));
+  const srcLine = kinds ? t('({0})', [kinds]) : t('(Unrecognized source)');
   statusBar.tooltip = failures.length
-    ? `Change Review 探测失败：${failures[0].message}\n点此打开设置修改 git/svn 路径。`
-    : `Change Review${srcLine}：共 ${total} 个文件与基准不同，${done} 个已审查。点击聚焦改动列表。`;
+    ? t('Change Review detection failed: {0}\nClick to open settings and fix the git/svn path.', [failures[0].message])
+    : t('Change Review{0}: {1} files differ from the baseline, {2} reviewed. Click to focus the changes list.', [srcLine, total, done]);
   statusBar.show();
 }
 
@@ -596,7 +599,7 @@ async function openFileForEdit(entry, line) {
   const abs = entry.file.absPath;
   try {
     if (!fs.existsSync(abs)) {
-      vscode.window.showInformationMessage('该文件当前不存在（可能已被删除），无法直接编辑。');
+      vscode.window.showInformationMessage(t('The file does not currently exist (it may have been deleted), so it cannot be edited directly.'));
       return;
     }
   } catch (e) {
@@ -620,9 +623,9 @@ async function openFileForEdit(entry, line) {
     }
     // 未打开：带 selection 打开，一步到位落在该行
     await vscode.window.showTextDocument(uri, { preview: false, selection: range });
-    vscode.window.setStatusBarMessage(`已打开 ${entry.file.relPath}:${lineNo}`, 3000);
+    vscode.window.setStatusBarMessage(t('Opened {0}:{1}', [entry.file.relPath, lineNo]), 3000);
   } catch (e) {
-    const msg = `打开 ${entry.file.relPath} 失败：${e.message}`;
+    const msg = t('Failed to open {0}: {1}', [entry.file.relPath, e.message]);
     log(msg);
     showErr(msg);
   }
@@ -638,7 +641,7 @@ async function editLineInFile(entry, lineNo, text, insertBelow, focusLine, opts)
   const abs = entry.file.absPath;
   const tail = opts && typeof opts.tail === 'string' ? opts.tail : ''; // Enter 在行中间：光标后半截成为下一行
   if (!abs || !fs.existsSync(abs)) {
-    vscode.window.showWarningMessage('该文件当前不存在（可能已被删除），无法写入修改。');
+    vscode.window.showWarningMessage(t('The file does not currently exist (it may have been deleted), so changes cannot be written.'));
     return;
   }
   if (typeof text !== 'string') { return; }
@@ -647,7 +650,7 @@ async function editLineInFile(entry, lineNo, text, insertBelow, focusLine, opts)
     const lines = content.split('\n');
     const idx = Number(lineNo) - 1;
     if (!(idx >= 0 && idx < lines.length)) {
-      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围（共 ${lines.length} 行），未写入。`);
+      vscode.window.showWarningMessage(t('Line number {0} is out of range ({1} lines total); not written.', [lineNo, lines.length]));
       return;
     }
     let changed = false;
@@ -655,17 +658,17 @@ async function editLineInFile(entry, lineNo, text, insertBelow, focusLine, opts)
     if (insertBelow) { lines.splice(idx + 1, 0, tail); }
     if (!changed && !insertBelow) {
       // Ctrl+S 但内容没变：给个明确反馈，别让人以为没生效
-      vscode.window.setStatusBarMessage(`该行内容已是最新，无需保存（${entry.file.relPath}:${lineNo}）`, 2000);
+      vscode.window.setStatusBarMessage(t('This line is already up to date; no save needed ({0}:{1})', [entry.file.relPath, lineNo]), 2000);
       return;
     }
     fs.writeFileSync(abs, lines.join('\n'), 'utf8');
     log(`[审查面板] 已写回 ${entry.file.relPath}:${lineNo}${insertBelow ? (tail !== null ? ' 并拆行' : ' 并插入新行') : ''}`);
-    vscode.window.setStatusBarMessage(`已写回 ${entry.file.relPath}:${lineNo}`, 2000);
+    vscode.window.setStatusBarMessage(t('Written back {0}:{1}', [entry.file.relPath, lineNo]), 2000);
     // 只复查这一个文件：全量 doRefresh 会触发整仓 git 扫描，行内编辑（尤其 Enter 拆行）会明显卡顿
     const targetFocus = focusLine ? Number(focusLine) : (insertBelow ? idx + 2 : undefined);
     await afterLineOp(entry, { focusLine: targetFocus });
   } catch (e) {
-    const msg = `写回第 ${lineNo} 行失败：${e.message}`;
+    const msg = t('Failed to write back line {0}: {1}', [lineNo, e.message]);
     log(msg);
     showErr(msg);
   }
@@ -680,7 +683,7 @@ async function insertLineAboveInFile(entry, lineNo) {
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     const idx = Number(lineNo) - 1;
     if (!(idx >= 0 && idx <= lines.length)) {
-      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未插入。`);
+      vscode.window.showWarningMessage(t('Line number {0} is out of range; not inserted.', [lineNo]));
       return;
     }
     lines.splice(idx, 0, '');
@@ -688,7 +691,7 @@ async function insertLineAboveInFile(entry, lineNo) {
     log(`[审查面板] 已在 ${entry.file.relPath}:${lineNo} 上方插入空行`);
     await afterLineOp(entry, { focusLine: Number(lineNo) + 1 }); // 原内容行被顶到 lineNo+1
   } catch (e) {
-    const msg = `插入行失败：${e.message}`;
+    const msg = t('Failed to insert line: {0}', [e.message]);
     log(msg);
     showErr(msg);
   }
@@ -703,7 +706,7 @@ async function insertLineInFile(entry, lineNo) {
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     const idx = Number(lineNo); // 插到该行之后（0 基 = lineNo）
     if (!(idx >= 0 && idx <= lines.length)) {
-      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未插入。`);
+      vscode.window.showWarningMessage(t('Line number {0} is out of range; not inserted.', [lineNo]));
       return;
     }
     lines.splice(idx, 0, '');
@@ -712,7 +715,7 @@ async function insertLineInFile(entry, lineNo) {
     await afterLineOp(entry, { focusLine: idx + 1 });
   } catch (e) {
     log(`插入行失败: ${e.message}`);
-    vscode.window.showErrorMessage(`插入行失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to insert line: {0}', [e.message]));
   }
 }
 
@@ -726,19 +729,19 @@ async function deleteLineInFile(entry, lineNo, focusLine) {
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     const idx = Number(lineNo) - 1;
     if (!(idx >= 0 && idx < lines.length)) {
-      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未删除。`);
+      vscode.window.showWarningMessage(t('Line number {0} is out of range; not deleted.', [lineNo]));
       return;
     }
     lines.splice(idx, 1);
     fs.writeFileSync(abs, lines.join('\n'), 'utf8');
     log(`[审查面板] 已删除 ${entry.file.relPath}:${lineNo}`);
-    vscode.window.setStatusBarMessage(`已删除 ${entry.file.relPath}:${lineNo}`, 2000);
+    vscode.window.setStatusBarMessage(t('Deleted {0}:{1}', [entry.file.relPath, lineNo]), 2000);
     // 焦点落到「被删行上面的那一行」：diff 重算后行号会漂移，不能用删掉的行号硬指。
     const target = Number(focusLine) > 0 ? Number(focusLine) : Math.max(1, Number(lineNo) - 1);
     await afterLineOp(entry, { focusLine: target });
   } catch (e) {
     log(`删除行失败: ${e.message}`);
-    vscode.window.showErrorMessage(`删除行失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to delete line: {0}', [e.message]));
   }
 }
 
@@ -747,9 +750,9 @@ async function clusterRestoreInFile(entry, hunkIndex, clusterIndex) {
   try {
     const res = await entry.source.provider.rejectCluster(entry.file, Number(hunkIndex), Number(clusterIndex), cfg().get('contextLines', 3));
     log(`已还原 ${entry.file.relPath} 第 ${Number(hunkIndex) + 1} 块的第 ${Number(clusterIndex) + 1} 段: ${res.message || ''}`);
-    vscode.window.setStatusBarMessage(`已还原 ${entry.file.relPath} 该段改动`, 3000);
+    vscode.window.setStatusBarMessage(t('Reverted the change in {0}', [entry.file.relPath]), 3000);
   } catch (e) {
-    const msg = `还原该段失败：${e.message}`;
+    const msg = t('Failed to revert this section: {0}', [e.message]);
     log(msg);
     showErr(msg);
     return;
@@ -781,7 +784,7 @@ async function deleteLinesInFile(entry, lines) {
     }
   } catch (e) {
     log(`批量删除行失败: ${e.message}`);
-    vscode.window.showErrorMessage(`删除选中行失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to delete selected lines: {0}', [e.message]));
   }
 }
 
@@ -805,7 +808,7 @@ async function insertLinesBelowInFile(entry, line, text) {
     }
   } catch (e) {
     log(`插入多行失败: ${e.message}`);
-    vscode.window.showErrorMessage(`插入失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to insert: {0}', [e.message]));
   }
 }
 
@@ -830,8 +833,8 @@ function pushSnapshot(entry) {
   } catch (e) { /* 记快照失败不影响主操作 */ }
 }
 
-async function undoFileOp(entry) { await restoreFrom(entry, fileUndoStack, fileRedoStack, '撤销'); }
-async function redoFileOp(entry) { await restoreFrom(entry, fileRedoStack, fileUndoStack, '重做'); }
+async function undoFileOp(entry) { await restoreFrom(entry, fileUndoStack, fileRedoStack, t('Undo')); }
+async function redoFileOp(entry) { await restoreFrom(entry, fileRedoStack, fileUndoStack, t('Redo')); }
 
 async function restoreFrom(entry, from, to, word) {
   if (!entry) { return; }
@@ -841,7 +844,7 @@ async function restoreFrom(entry, from, to, word) {
     if (from[k].abs === abs) { i = k; break; }
   }
   if (i === -1) {
-    vscode.window.setStatusBarMessage(`没有可${word}的操作`, 2000);
+    vscode.window.setStatusBarMessage(t('No {0} operation available', [word]), 2000);
     return;
   }
   const snap = from.splice(i, 1)[0];
@@ -851,10 +854,10 @@ async function restoreFrom(entry, from, to, word) {
     to.push({ abs, root: entry.source.root, relPath: entry.file.relPath, content: cur });
     fs.writeFileSync(abs, snap.content, 'utf8');
     log(`[审查面板] ${word} ${entry.file.relPath}`);
-    vscode.window.setStatusBarMessage(`已${word}：${entry.file.relPath}`, 2000);
+    vscode.window.setStatusBarMessage(t('{0} done: {1}', [word, entry.file.relPath]), 2000);
     await afterLineOp(entry, undefined);
   } catch (e) {
-    const msg = `${word}失败：${e.message}`;
+    const msg = t('{0} failed: {1}', [word, e.message]);
     log(msg);
     showErr(msg);
   }
@@ -869,7 +872,7 @@ async function mergeLineInFile(entry, lineNo, dir, text) {
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     const idx = Number(lineNo) - 1;
     if (!(idx >= 0 && idx < lines.length)) {
-      vscode.window.showWarningMessage(`行号 ${lineNo} 超出文件范围，未合并。`);
+      vscode.window.showWarningMessage(t('Line number {0} is out of range; not merged.', [lineNo]));
       return;
     }
     if (dir === 'up') {
@@ -982,7 +985,7 @@ async function nextUnreviewed(entry) {
     log(`[next] 点击，当前文件=${entry ? entry.file.relPath : '(无)'}，总改动=${model.flat.length}`);
     await nextUnreviewedInner(entry);
   } catch (e) {
-    const msg = `下一个待审查失败：${e.message}`;
+    const msg = t('Failed to go to next unreviewed: {0}', [e.message]);
     log(msg);
     outputChannel.show(true);
     showErr(msg);
@@ -992,7 +995,7 @@ async function nextUnreviewed(entry) {
 async function nextUnreviewedInner(entry) {
   if (!model.flat.length) {
     log('[next] 没有任何改动，提示后返回');
-    vscode.window.showInformationMessage('当前没有待审查的改动');
+    vscode.window.showInformationMessage(t('No changes pending review'));
     return;
   }
   let start = 0;
@@ -1014,12 +1017,11 @@ async function nextUnreviewedInner(entry) {
   log('[next] 所有文件都已审查完毕');
   // 面板还停在旧文件上时，换成"全部完成"页，避免停留在过期内容
   if (panel && panel.panel) {
-    const done = vscode.env.language && vscode.env.language.toLowerCase().startsWith('zh')
-      ? '所有文件都已审查完毕 ✓' : 'All files reviewed ✓';
+    const done = t('All files reviewed ✓');
     panel.panel.webview.html = `<html><body style="font-family:var(--vscode-font-family,sans-serif);padding:40px;font-size:15px;opacity:.8">${done}</body></html>`;
     panel.entry = null;
   }
-  vscode.window.showInformationMessage('所有文件都已审查完毕 ✓');
+  vscode.window.showInformationMessage(t('All files reviewed ✓'));
 }
 
 /**
@@ -1040,7 +1042,7 @@ async function blockFile(entry) {
     target = { uri: { fsPath: srcRoot } };
   }
   if (!target) {
-    vscode.window.showWarningMessage(`无法计算 ${entry.file.relPath} 的相对路径，未写入 .crignore`);
+    vscode.window.showWarningMessage(t('Could not compute the relative path of {0}; .crignore not written', [entry.file.relPath]));
     return;
   }
   // 规则 = 相对「该 .crignore 所在目录」的路径（同 .gitignore 语义）
@@ -1050,7 +1052,7 @@ async function blockFile(entry) {
     res = appendIgnoreRule(target.uri.fsPath, rel);
   } catch (e) {
     log(`写入 .crignore 失败：${e.message}`);
-    showErr(`写入 .crignore 失败：${e.message}`);
+    showErr(t('Failed to write .crignore: {0}', [e.message]));
     return;
   }
   log(`[blockFile] 规则=${rel}（基准=.crignore 所在目录 ${target.uri.fsPath}）→ ${path.join(target.uri.fsPath, '.crignore')} (${res})`);
@@ -1063,9 +1065,9 @@ async function blockFile(entry) {
   updateBadges();
   const gone = !findEntry(entry.source.root, entry.file.relPath);
   if (res === 'exists') {
-    vscode.window.setStatusBarMessage(`${rel} 已在 .crignore 中`, 3000);
+    vscode.window.setStatusBarMessage(t('{0} is already in .crignore', [rel]), 3000);
   } else {
-    vscode.window.setStatusBarMessage(`已屏蔽 ${rel}`, 3000);
+    vscode.window.setStatusBarMessage(t('Ignored {0}', [rel]), 3000);
   }
   if (!gone) {
     // 写进去了但列表里还在：把真实原因记到日志，别让用户只看到「没生效」
@@ -1116,7 +1118,7 @@ const handlers = {
   mergeLine: async (entry, line, dir, text) => { await mergeLineInFile(entry, line, dir, text); },
   undoFile: async (entry) => { await undoFileOp(entry); },
   redoFile: async (entry) => { await redoFileOp(entry); },
-  saveNow: async (entry) => { vscode.window.setStatusBarMessage(`所有改动已实时写入 ${entry.file.relPath}`, 2000); },
+  saveNow: async (entry) => { vscode.window.setStatusBarMessage(t('All changes written to {0} in real time', [entry.file.relPath]), 2000); },
   deleteLine: async (entry, line, focusLine) => { await deleteLineInFile(entry, line, focusLine); },
   clusterRestore: async (entry, hunk, clus) => { await clusterRestoreInFile(entry, hunk, clus); },
   deleteLines: async (entry, lines) => { await deleteLinesInFile(entry, lines); },
@@ -1271,7 +1273,7 @@ async function acceptFile(entry) {
     if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
     else { provider.refresh(); }
     updateBadges();
-    vscode.window.showInformationMessage(`已接受 ${entry.file.relPath} 的全部改动`);
+    vscode.window.showInformationMessage(t('Accepted all changes in {0}', [entry.file.relPath]));
   }
 }
 
@@ -1293,7 +1295,7 @@ async function rejectFile(entry) {
     if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
     else { provider.refresh(); }
     updateBadges();
-    vscode.window.showInformationMessage(`已拒绝 ${entry.file.relPath} 的全部改动`);
+    vscode.window.showInformationMessage(t('Rejected all changes in {0}', [entry.file.relPath]));
   }
 }
 
@@ -1308,7 +1310,7 @@ async function verifyHunkSig(entry, index, sig) {
 
 async function rejectHunk(entry, index, sig) {
   if (sig && !(await verifyHunkSig(entry, index, sig))) {
-    vscode.window.showWarningMessage('文件内容已变化，该块位置对不上了，请刷新后重试。');
+    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please refresh and retry.'));
     return;
   }
   // 只记录拒绝决定，不立即改文件——和接受块对称：执行统一发生在「标记已审查」时，
@@ -1320,7 +1322,7 @@ async function rejectHunk(entry, index, sig) {
   log(`已记录拒绝 ${entry.file.relPath} 第 ${index + 1} 块 (sig=${sig})，标记已审查时执行还原`);
   await autoMarkWhenAllHunksDone(entry);
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.setStatusBarMessage(`已拒绝 ${entry.file.relPath} 第 ${index + 1} 个改动块（标记已审查时执行还原）`, 4000);
+  vscode.window.setStatusBarMessage(t('Rejected change block {0} in {1} (revert runs when marked as reviewed)', [index + 1, entry.file.relPath]), 4000);
 }
 
 /** 撤销某个块的拒绝决定（反悔） */
@@ -1335,7 +1337,7 @@ async function unacceptHunk(entry, index, sig) {
   await store.setHunkReviewed(entry.source.root, entry.file.relPath, sig, false);
   log(`已取消接受 ${entry.file.relPath} 第 ${index + 1} 块`);
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.setStatusBarMessage(`已取消接受 ${entry.file.relPath} 第 ${index + 1} 个改动块`, 3000);
+  vscode.window.setStatusBarMessage(t('Cancelled acceptance of change block {0} in {1}', [index + 1, entry.file.relPath]), 3000);
 }
 
 /**
@@ -1351,15 +1353,15 @@ async function applyPendingRejects(entry) {
     const sigs = Object.keys(table);
     if (!sigs.length) { return 0; }
     const p = entry.source.provider;
-    const t = await p.getDiff(entry.file, cfg().get('contextLines', 3));
-    const parsed = parseDiff(t)[0];
+    const diffText = await p.getDiff(entry.file, cfg().get('contextLines', 3));
+    const parsed = parseDiff(diffText)[0];
     const hunks = parsed ? parsed.hunks : [];
     const allRejected = hunks.length > 0 && hunks.every((h) => table[hunkSignature(h)]);
     if (allRejected) {
       const res = await p.rejectFile(entry.file);
       await store.clearRejectedHunks(entry.source.root, entry.file.relPath);
       await clearHunkDecisions(entry);
-      const msg = `已执行 ${entry.file.relPath} 的整文件拒绝（${hunks.length} 块全被拒绝）`;
+      const msg = t('Executed full-file rejection of {0} ({1} blocks rejected)', [entry.file.relPath, hunks.length]);
       log(msg);
       vscode.window.setStatusBarMessage(msg, 3000);
       return hunks.length;
@@ -1375,11 +1377,11 @@ async function applyPendingRejects(entry) {
     await store.clearRejectedHunks(entry.source.root, entry.file.relPath);
     if (applied) {
       log(`已执行 ${entry.file.relPath} 的拒绝决定（还原 ${applied} 块）`);
-      vscode.window.setStatusBarMessage(`已还原 ${entry.file.relPath} 的 ${applied} 个拒绝块`, 3000);
+      vscode.window.setStatusBarMessage(t('Reverted {0} rejected blocks in {1}', [applied, entry.file.relPath]), 3000);
     }
     return applied;
   } catch (e) {
-    const msg = `执行拒绝块失败：${e.message}`;
+    const msg = t('Failed to execute rejected blocks: {0}', [e.message]);
     log(msg);
     showErr(msg);
     return -1; // 拒绝块没执行成功就不标记已审查，保持状态一致
@@ -1399,13 +1401,13 @@ async function currentSig(entry, index) {
 
 async function acceptHunk(entry, index, sig) {
   if (sig && !(await verifyHunkSig(entry, index, sig))) {
-    vscode.window.showWarningMessage('文件内容已变化，该块位置对不上了，请刷新后重试。');
+    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please refresh and retry.'));
     return;
   }
   try {
     await entry.source.provider.acceptHunk(entry.file, index, cfg().get('contextLines', 3));
   } catch (e) {
-    const msg = `接受第 ${index + 1} 个改动块失败：${e.message}`;
+    const msg = t('Failed to accept change block {0}: {1}', [index + 1, e.message]);
     log(msg);
     showErr(msg);
     return;
@@ -1418,7 +1420,7 @@ async function acceptHunk(entry, index, sig) {
   // 接受只动暂存区/标记，工作区内容没变：不需要整表重扫
   await autoMarkWhenAllHunksDone(entry);
   if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
-  vscode.window.setStatusBarMessage(`已接受 ${entry.file.relPath} 第 ${index + 1} 个改动块`, 3000);
+  vscode.window.setStatusBarMessage(t('Accepted change block {0} in {1}', [index + 1, entry.file.relPath]), 3000);
 }
 
 /** 一个文件的所有改动块都有决定（接受或拒绝）→ 自动标记已审查（拒绝块在此刻执行还原）。返回是否真的标记了 */
@@ -1508,33 +1510,34 @@ async function reconcileDecidedFiles() {
 async function initBaseline(arg) {
   const src = resolveSource(arg) || model.sources.find((s) => s.provider.id === 'snapshot');
   if (!src) {
-    vscode.window.showInformationMessage('没有找到可用于建立基准的项目目录。');
+    vscode.window.showInformationMessage(t('No project directory available to set a baseline.'));
     return;
   }
   if (src.provider.id !== 'snapshot') {
     vscode.window.showInformationMessage(
-      `该项目由 ${src.provider.label} 管理，对比基准就是${src.provider.baseLabel}，不需要手动初始化。`
+      t('This project is managed by {0}; its comparison baseline is {1}, so manual initialization is not needed.', [src.provider.label, src.provider.baseLabel])
     );
     return;
   }
   const info = src.provider.baselineInfo();
+  const setBaseline = t('Set baseline');
   const answer = await vscode.window.showWarningMessage(
     info
-      ? `将用当前文件状态重新建立对比基准（覆盖原有基准，原有 ${info.fileCount} 个文件的记录会被替换）。继续？`
-      : `将把 ${src.root} 的当前文件状态记录为对比基准，之后以此为基准显示改动。继续？`,
+      ? t('Rebuild the comparison baseline from the current file state (this overwrites the existing baseline; records of {0} files will be replaced). Continue?', [info.fileCount])
+      : t('Record the current file state of {0} as the comparison baseline; changes will then be shown against it. Continue?', [src.root]),
     { modal: true },
-    '建立基准'
+    setBaseline
   );
-  if (answer !== '建立基准') { return; }
+  if (answer !== setBaseline) { return; }
   try {
     const res = src.provider.initBaseline();
     log(`已建立基准：${src.root}（${res.fileCount} 个文件）`);
   } catch (e) {
-    vscode.window.showErrorMessage(`建立基准失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to set baseline: {0}', [e.message]));
     return;
   }
   await doRefresh(false);
-  vscode.window.showInformationMessage(`已把当前状态设为对比基准（${src.root}）`);
+  vscode.window.showInformationMessage(t('Current state set as the comparison baseline ({0})', [src.root]));
 }
 
 async function updateBaseline(arg) {
@@ -1553,33 +1556,34 @@ async function updateBaseline(arg) {
     || resolveSource(arg && (arg.repoRoot || arg.root) ? arg : null)
     || model.sources.find((s) => s.provider.id === 'snapshot');
   if (!src) {
-    vscode.window.showInformationMessage('没有找到可更新基准的项目目录。');
+    vscode.window.showInformationMessage(t('No project directory available to update the baseline.'));
     return;
   }
   if (!src.provider.capabilities.baselineUpdate) {
     vscode.window.showInformationMessage(
-      `该项目由 ${src.provider.label} 管理，基准由版本控制系统决定（${src.provider.baseLabel}），无需手动更新。`
+      t('This project is managed by {0}; its baseline is determined by the version control system ({1}), so manual update is not needed.', [src.provider.label, src.provider.baseLabel])
     );
     return;
   }
   const only = entry ? [entry.file.relPath] : null;
+  const updateBaselineLabel = t('Update baseline');
   const answer = await vscode.window.showWarningMessage(
     only
-      ? `把 ${only[0]} 的当前内容设为新的对比基准？该文件将不再显示为改动。`
-      : '把当前所有文件的状态设为新的对比基准？之后所有文件都不再显示为改动。',
+      ? t('Set the current content of {0} as the new comparison baseline? The file will no longer be shown as changed.', [only[0]])
+      : t('Set the current state of all files as the new comparison baseline? All files will no longer be shown as changed.'),
     { modal: true },
-    '更新基准'
+    updateBaselineLabel
   );
-  if (answer !== '更新基准') { return; }
+  if (answer !== updateBaselineLabel) { return; }
   try {
     src.provider.updateBaseline(only);
     log(`已更新基准：${src.root}${only ? ' (' + only.join(',') + ')' : '（全部）'}`);
   } catch (e) {
-    vscode.window.showErrorMessage(`更新基准失败：${e.message}`);
+    vscode.window.showErrorMessage(t('Failed to update baseline: {0}', [e.message]));
     return;
   }
   await doRefresh(false);
-  vscode.window.showInformationMessage(only ? `已更新 ${only[0]} 的基准` : '已更新对比基准');
+  vscode.window.showInformationMessage(only ? t('Updated baseline for {0}', [only[0]]) : t('Updated comparison baseline'));
 }
 
 function startTimer() {
@@ -1598,9 +1602,8 @@ function checkRemoteMismatch() {
   if (remoteFolders.length && !vscode.env.remoteName) {
     log('警告：工作区是远程/WSL，但扩展运行在本地宿主');
     vscode.window.showWarningMessage(
-      'Change Review 检测到工作区在远程/WSL 中，但插件正运行在 Windows 本地。' +
-      '请在扩展面板里点「在 WSL 中安装」把插件装进远程，否则 git/svn 路径与文件操作都会异常。',
-      '我知道了'
+      t('Change Review detected that the workspace is in a remote/WSL environment, but the extension is running on the local Windows host. Please click "Install in WSL" in the extensions panel to install the extension into the remote, otherwise git/svn paths and file operations will behave abnormally.'),
+      t('Got it')
     );
   }
 }
@@ -1669,7 +1672,7 @@ async function activate(context) {
       try {
         return await fn(...args);
       } catch (e) {
-        const msg = `命令 ${cmd} 执行失败：${e && e.message ? e.message : e}`;
+        const msg = t('Command {0} failed: {1}', [cmd, e && e.message ? e.message : e]);
         log(`${msg}\n${e && e.stack ? e.stack : ''}`);
         showErr(msg);
       }
@@ -1685,14 +1688,14 @@ async function activate(context) {
   register('changeReview.configureExclude', async () => {
     const folders = vscode.workspace.workspaceFolders || [];
     if (!folders.length) {
-      vscode.window.showInformationMessage('请先打开一个文件夹，再配置排除规则。');
+      vscode.window.showInformationMessage(t('Please open a folder first, then configure exclude rules.'));
       return;
     }
     let target = folders[0];
     if (folders.length > 1) {
       const pick = await vscode.window.showQuickPick(
         folders.map((f) => ({ label: f.name || f.uri.fsPath, fsPath: f.uri.fsPath })),
-        { placeHolder: '选择要配置排除规则的文件夹' }
+        { placeHolder: t('Select the folder to configure exclude rules for') }
       );
       if (!pick) { return; }
       target = { uri: { fsPath: pick.fsPath } };
@@ -1706,7 +1709,7 @@ async function activate(context) {
     const doc = await vscode.workspace.openTextDocument(igPath);
     await vscode.window.showTextDocument(doc);
     if (created) {
-      vscode.window.showInformationMessage('已创建 .crignore：每行一个 glob，保存后自动生效。');
+      vscode.window.showInformationMessage(t('Created .crignore: one glob per line; takes effect after save.'));
     }
   });
   register('changeReview.blockFile', async (arg) => {
@@ -1739,7 +1742,7 @@ async function activate(context) {
     await refreshSingleEntry(entry);
     provider.refresh();
     updateBadges();
-    vscode.window.setStatusBarMessage(`已标记 ${entry.file.relPath} 为已审查`, 3000);
+    vscode.window.setStatusBarMessage(t('Marked {0} as reviewed', [entry.file.relPath]), 3000);
     if (!findEntry(entry.source.root, entry.file.relPath)) { return; } // 已无差异，refreshSingleEntry 已跳下一个
     if (panel && panel.entry && sameEntry(panel.entry, entry)) { await panel.reload(); }
     await advanceAfterReviewed(entry);
@@ -1750,24 +1753,24 @@ async function activate(context) {
     await setReviewed(entry, false);
     provider.refresh();
     updateBadges();
-    vscode.window.setStatusBarMessage(`已取消 ${entry.file.relPath} 的审查标记`, 3000);
+    vscode.window.setStatusBarMessage(t('Cleared the review mark on {0}', [entry.file.relPath]), 3000);
   });
   register('changeReview.markAllReviewed', async () => {
     if (!model.flat.length) {
-      vscode.window.showInformationMessage('当前没有待审查的改动');
+      vscode.window.showInformationMessage(t('No changes pending review'));
       return;
     }
     // 走 setReviewed：git 工程随标记执行 git add（与核心规则一致），拒绝块在此刻还原
     for (const e of model.flat.slice()) { await setReviewed(e, true); }
     provider.refresh();
     updateBadges();
-    vscode.window.setStatusBarMessage(`已把 ${model.flat.length} 个文件标记已审查`, 3000);
+    vscode.window.setStatusBarMessage(t('Marked {0} files as reviewed', [model.flat.length]), 3000);
   });
   register('changeReview.clearReviewed', async () => {
     for (const e of model.flat.slice()) { await setReviewed(e, false); }
     provider.refresh();
     updateBadges();
-    vscode.window.setStatusBarMessage('已清除所有审查标记', 3000);
+    vscode.window.setStatusBarMessage(t('Cleared all reviewed marks'), 3000);
   });
   register('changeReview.nextUnreviewed', async () => { await nextUnreviewed(null); });
   register('changeReview.revealFile', async (arg) => {

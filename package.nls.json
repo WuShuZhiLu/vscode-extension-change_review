@@ -11,7 +11,7 @@
   "cmd.markReviewed": "Mark as Reviewed",
   "cmd.unmarkReviewed": "Unmark Reviewed",
   "cmd.markAllReviewed": "Mark All as Reviewed",
-  "cmd.clearReviewed": "Clear All Reviewed Marks",
+  "cmd.clearReviewed": "Clear All Reviewed",
   "cmd.nextUnreviewed": "Next Unreviewed",
   "cmd.revealFile": "Reveal in Explorer",
   "cmd.initBaseline": "Initialize Baseline",
