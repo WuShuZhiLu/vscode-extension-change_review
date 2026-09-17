@@ -1,3 +1,8 @@
+## 0.5.1
+- Fixed mixed Chinese/English: native messages stayed English even when Chinese was forced
+- Runtime messages, panel, and provider labels all follow `changeReview.uiLanguage` (zh / en / auto)
+- Added language-mode tests: messages and panel UI stay consistent in both zh and en
+
 ## 0.5.0
 - Fixed `extension.js` not supporting multiple languages
 - Polished the README, de-duplicated changelog entries, and synced the Chinese and English docs

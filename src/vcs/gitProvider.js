@@ -17,7 +17,7 @@ class GitProvider {
     this.id = 'git';
     this.label = 'Git';
     this.root = root;
-    this.baseLabel = 'HEAD（上次提交）';
+    this.baseLabel = util.uiLang() === 'zh' ? 'HEAD（上次提交）' : 'HEAD (last commit)';
     this.scopes = new Set(); // 空 = 整个仓库；非空 = 只列这些打开目录内的改动
     // 手动排除（glob，相对仓库根），对所有 kind 生效；默认空
     this.exclude = Array.isArray(options && options.exclude) ? options.exclude : [];

@@ -1414,6 +1414,95 @@ async function mainUnacceptSymmetry() {
   try { fs.rmSync(RH, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 }
 
+/** [28] 语言模式：zh 模式提示与面板全中文、en 模式全英文，不混用（uiLanguage 强制 / auto 跟随） */
+async function mainLangModes() {
+  const RL = path.join(os.tmpdir(), `cr-mock-lang-${Date.now()}`);
+  fs.mkdirSync(RL, { recursive: true });
+  const gl = (args) => execFileSync('git', args, { cwd: RL, encoding: 'utf8' });
+  const wl = (rel, content) => fs.writeFileSync(path.join(RL, rel), content, 'utf8');
+  gl(['init', '-q']);
+  gl(['config', 'user.email', 'm@check.local']);
+  gl(['config', 'user.name', 'Mock Check']);
+  gl(['config', 'core.autocrlf', 'false']);
+  gl(['config', 'commit.gpgsign', 'false']);
+  wl('f.js', Array.from({ length: 8 }, (_, i) => `const v${i} = ${i};`).join('\n') + '\n');
+  gl(['add', '-A']);
+  gl(['commit', '-q', '-m', 'init']);
+  wl('f.js', Array.from({ length: 8 }, (_, i) => (i === 0 ? `const v0 = 42;` : `const v${i} = ${i};`)).join('\n') + '\n');
+
+  console.log('\n[28] 语言模式（zh / en 不混用）');
+  // 源码里每个 t() 的 key 都必须有中文译文（词典覆盖，防止漏译回退英文）
+  const srcExt = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.js'), 'utf8');
+  const reT = /(?<!\w)t\('((?:[^'\\]|\\.)*)'/g;
+  const used = new Set();
+  let m;
+  while ((m = reT.exec(srcExt))) { used.add(m[1].replace(/\\n/g, '\n')); }
+
+  vscode.workspace.workspaceFolders = [{ uri: Uri.file(RL) }];
+  delete config.uiLanguage; // auto：跟随 vscode.env.language（mock = zh-cn）
+  const stateL = {};
+  const contextL = {
+    subscriptions: [],
+    workspaceState: {
+      get: (k, d) => (stateL[k] === undefined ? d : stateL[k]),
+      update: (k, v) => { stateL[k] = v; return Promise.resolve(); }
+    }
+  };
+  const extL = require('../src/extension.js');
+  const { t: tFn, zhDict } = extL.__test;
+  await extL.activate(contextL);
+  await new Promise((r) => setTimeout(r, 80));
+
+  const missing = [...used].filter((k) => !(k in zhDict));
+  check('zh：源码所有 t() key 都有中文译文', missing.length === 0, missing.join(' | ') || '(none)');
+  const zhAll = [...used].every((k) => tFn(k) === zhDict[k] || (!zhDict[k] && tFn(k) === k));
+  check('zh：t() 输出全部命中中文译文', zhAll);
+
+  // 行为抽样：标记全部 → 状态栏是中文
+  vscode._statusMsgs.length = 0;
+  await registered.get('changeReview.markAllReviewed')();
+  await new Promise((r) => setTimeout(r, 80));
+  const zhExpect = String(zhDict['Marked {0} files as reviewed'] || '').replace('{0}', '1');
+  check('zh：状态栏提示为中文', vscode._statusMsgs.some((s) => s === zhExpect), `${vscode._statusMsgs.join('|')} 期望=${zhExpect}`);
+
+  // 面板 UI：zh 模式含中文按钮、无英文按钮
+  await registered.get('changeReview.openReview')({ repoRoot: RL, relPath: 'f.js' });
+  await new Promise((r) => setTimeout(r, 80));
+  const zhHtml = lastPanel.webview.html;
+  check('zh：面板显示中文按钮（接受全部/标记已审查）', zhHtml.includes('接受全部') && zhHtml.includes('标记已审查'));
+  check('zh：面板语言解析为 zh', /ui=zh/.test(zhHtml), (zhHtml.match(/id="panelVer">[^<]*/) || [''])[0]);
+
+  // --- en 模式：uiLanguage 强制 en（provider 文案在构造时定，需重新激活）---
+  config.uiLanguage = 'en';
+  const stateL2 = {};
+  const contextL2 = {
+    subscriptions: [],
+    workspaceState: {
+      get: (k, d) => (stateL2[k] === undefined ? d : stateL2[k]),
+      update: (k, v) => { stateL2[k] = v; return Promise.resolve(); }
+    }
+  };
+  await extL.activate(contextL2);
+  await new Promise((r) => setTimeout(r, 80));
+  const enLeak = [...used].filter((k) => /[\u4e00-\u9fff]/.test(tFn(k)));
+  check('en：t() 输出无中文（全部英文默认串）', enLeak.length === 0, enLeak.slice(0, 3).join(' | ') || '(none)');
+  vscode._statusMsgs.length = 0;
+  await registered.get('changeReview.clearReviewed')();
+  await new Promise((r) => setTimeout(r, 80));
+  check('en：状态栏提示为英文', vscode._statusMsgs.some((s) => s === 'Cleared all reviewed marks'), vscode._statusMsgs.join('|'));
+
+  await registered.get('changeReview.openReview')({ repoRoot: RL, relPath: 'f.js' });
+  await new Promise((r) => setTimeout(r, 80));
+  const enHtml = lastPanel.webview.html;
+  check('en：面板显示英文按钮（Accept all / Mark as reviewed）', enHtml.includes('Accept all') && enHtml.includes('Mark as reviewed'), '');
+  // 只检查可见文本：<style>/<script> 里的注释是源码注释，不渲染，剔除后再扫
+  const enVisible = enHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/, '').replace(/<script[^>]*>[\s\S]*?<\/script>/, '');
+  check('en：面板可见文本无中文残留', !/[\u4e00-\u9fff]/.test(enVisible), (enVisible.match(/[\u4e00-\u9fff]+/g) || []).slice(0, 5).join(','));
+
+  delete config.uiLanguage; // 还原，避免影响其他场景
+  try { fs.rmSync(RL, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+}
+
 /**
  * 迭代提速：只跑指定场景，不必每次都跑完（全量约 5 分钟）。
  *   node tools/mockcheck.js --only main          # 只跑主流程（各小节）
@@ -1441,7 +1530,8 @@ const SCENARIOS = [
   ['marker', () => mainActiveMarker()],
   ['unmark', () => mainManualUnmark()],
   ['reprocess', () => mainUnmarkThenReprocess()],
-  ['unaccept', () => mainUnacceptSymmetry()]
+  ['unaccept', () => mainUnacceptSymmetry()],
+  ['i18n', () => mainLangModes()]
 ];
 
 let chain = Promise.resolve();

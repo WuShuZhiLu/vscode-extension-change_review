@@ -191,7 +191,7 @@ function renderHunk(hunk, index, opts) {
     <div class="hunk-head">
       <span class="range">${escapeHtml(hunk.header)}</span>
       <span class="hc"><i class="a">+${hunk.added}</i><i class="d">−${hunk.removed}</i></span>
-      ${reviewed ? '<span class="donebadge">已接受 ✓</span>' : ''}
+      ${reviewed ? `<span class="donebadge">${panelLang() === 'zh' ? '已接受 ✓' : 'Accepted ✓'}</span>` : ''}
       ${rejected && !reviewed ? `<span class="rejbadge">${t('hunkRejectedBadge')}</span>` : ''}
       <span class="spacer"></span>
       <span class="hact">${actions.join('')}</span>
@@ -216,6 +216,7 @@ function buildHtml(ctx) {
     : `<div class="empty">${parsed.binary ? t('binaryDiff') : (file.large ? t('largeFile') : t('noDiff'))}</div>`;
 
   const label = t('kinds')[file.kind] || file.kind;
+  const zh = panelLang() === 'zh';
   const acceptLabel = t('acceptAll');
   const acceptTitle = t('acceptAllTitle');
   const rejectLabel = t('rejectAll');
@@ -333,12 +334,12 @@ function buildHtml(ctx) {
     <div>
       <span class="path">${escapeHtml(file.relPath)}</span>
       <span class="badge">${escapeHtml(label)}</span>
-      ${file.staged ? '<span class="badge">已暂存</span>' : ''}
-      ${file.reviewed ? '<span class="state">已审查 ✓</span>' : ''}
+      ${file.staged ? `<span class="badge">${panelLang() === 'zh' ? '已暂存' : 'Staged'}</span>` : ''}
+      ${file.reviewed ? `<span class="state">${panelLang() === 'zh' ? '已审查 ✓' : 'Reviewed ✓'}</span>` : ''}
     </div>
     <div class="sub">
       <span class="stat"><span class="a">+${file.added}</span> <span class="d">−${file.removed}</span></span>
-      <span> · ${parsed.hunks.length} 个改动块${parsed.hunks.length ? `（已接受 ${doneCount}）` : ''} · ${escapeHtml(ctx.sourceLabel || ctx.repoName || '')} · 对比 ${escapeHtml(ctx.baseLabel || '')}</span>
+      <span> · ${parsed.hunks.length}${zh ? ' 个改动块' : ' hunks'}${parsed.hunks.length ? (zh ? `（已接受 ${doneCount}）` : ` (${doneCount} accepted)`) : ''} · ${escapeHtml(ctx.sourceLabel || ctx.repoName || '')} · ${zh ? '对比' : 'vs'} ${escapeHtml(ctx.baseLabel || '')}</span>
     </div>
   </div>
   <div class="toolbar">
@@ -874,10 +875,13 @@ class ReviewPanel {
     const parsedAll = parseDiff(diffText);
     const parsed = parsedAll[0] || { hunks: [], binary: false, isNew: false, isDeleted: false };
     const src = entry.source;
-    panel.title = `审查：${path.basename(entry.file.relPath)}`;
+    panel.title = `${panelLang() === 'zh' ? '审查' : 'Review'}：${path.basename(entry.file.relPath)}`;
+    const zhUi = panelLang() === 'zh';
     const rejectTitle = src.provider.id === 'git'
-      ? '放弃改动，将文件还原到上次提交 (HEAD)'
-      : (src.provider.id === 'svn' ? '放弃改动，将文件还原到 SVN BASE' : '放弃改动，将文件还原到对比基准');
+      ? (zhUi ? '放弃改动，将文件还原到上次提交 (HEAD)' : 'Discard changes and restore the file to the last commit (HEAD)')
+      : (src.provider.id === 'svn'
+        ? (zhUi ? '放弃改动，将文件还原到 SVN BASE' : 'Discard changes and restore the file to SVN BASE')
+        : (zhUi ? '放弃改动，将文件还原到对比基准' : 'Discard changes and restore the file to the baseline'));
 
     panel.webview.html = buildHtml({
       file: entry.file,

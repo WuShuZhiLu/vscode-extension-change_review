@@ -375,6 +375,18 @@ function relInScope(relPath, root, scopeDir) {
   return p === rel || p.startsWith(rel + '/');
 }
 
+/** UI 语言：zh / en。跟随 changeReview.uiLanguage（auto 时看 VSCode 显示语言），provider 文案用 */
+function uiLang() {
+  try {
+    const vscode = require('vscode');
+    const cfg = vscode.workspace.getConfiguration && vscode.workspace.getConfiguration('changeReview');
+    const forced = cfg ? String(cfg.get('uiLanguage', 'auto') || 'auto').toLowerCase() : 'auto';
+    if (forced === 'zh' || forced === 'en') { return forced; }
+    const l = String((vscode.env && vscode.env.language) || '').toLowerCase();
+    return l.startsWith('zh') ? 'zh' : 'en';
+  } catch (e) { return 'en'; }
+}
+
 module.exports = {
   DEFAULT_EXCLUDE,
   exec,
@@ -398,5 +410,6 @@ module.exports = {
   countLinesOfText,
   relToAbs,
   scopeRelOf,
-  relInScope
+  relInScope,
+  uiLang
 };

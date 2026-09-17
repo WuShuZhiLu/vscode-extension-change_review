@@ -1,3 +1,8 @@
+## 0.5.1
+- 修复强制中文时原生提示仍显示英文的中英混用
+- 运行时提示、面板、来源文案统一跟随 `changeReview.uiLanguage`（zh / en / auto）
+- 新增语言模式测试：zh / en 下提示与面板 UI 均不混用
+
 ## 0.5.0
 - 修复extension.js未支持多语言
 - 完善README文档，changelog内容去重，同步中英文档内容

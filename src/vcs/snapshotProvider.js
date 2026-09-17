@@ -17,7 +17,7 @@ const FILES_DIR = 'files';
 class SnapshotProvider {
   constructor(root, storageDir, options = {}) {
     this.id = 'snapshot';
-    this.label = '快照基准';
+    this.label = util.uiLang() === 'zh' ? '快照基准' : 'Snapshot';
     this.root = root;
     this.storageDir = storageDir;
     const given = options || {};
@@ -30,7 +30,7 @@ class SnapshotProvider {
     this.runtimeExclude = Array.isArray(options.runtimeExclude) ? options.runtimeExclude : [];
     // 项目忽略文件（.crignore / .gitignore fallback）：按「各自规则文件所在目录」锚定（同 .gitignore 语义）
     this.excludeSets = Array.isArray(options.excludeSets) ? options.excludeSets : [];
-    this.baseLabel = '基准快照';
+    this.baseLabel = util.uiLang() === 'zh' ? '基准快照' : 'Baseline snapshot';
     this.capabilities = {
       stage: false,
       hunkStage: false,

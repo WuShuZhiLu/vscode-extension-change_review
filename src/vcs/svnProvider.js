@@ -125,7 +125,7 @@ class SvnProvider {
     this.id = 'svn';
     this.label = 'SVN';
     this.root = root;
-    this.baseLabel = 'BASE（SVN 基础版本）';
+    this.baseLabel = util.uiLang() === 'zh' ? 'BASE（SVN 基础版本）' : 'BASE';
     this.scopes = new Set(); // 空 = 整个工作副本；非空 = 只列这些打开目录内的改动
     // 手动排除规则：用户填的 glob 列表（默认空），对所有改动生效（包括版本化的
     // 修改与删除、以及未版本化项）。设 [] 表示不额外排除。

@@ -1,8 +1,26 @@
 'use strict';
 
 const vscode = require('vscode');
-// 轻量 i18n 封装：默认串为英文，译文在 package.nls.*.json；l10n 不可用时回退到默认串（不会崩）
-const t = (id, args) => (vscode.l10n && vscode.l10n.t ? vscode.l10n.t(id, args) : id);
+// 轻量 i18n：默认串为英文，中文译文在 package.nls.zh-cn.json（含全部运行时提示）。
+// 注意不能用 vscode.l10n.t：它运行时只读 l10n/bundle.l10n.*.json，不读 package.nls.*.json。
+// 语言跟随 changeReview.uiLanguage：zh 强制中文 / en 强制英文 / auto 跟随 VSCode 显示语言。
+const zhDict = (() => {
+  try { return require('../package.nls.zh-cn.json') || {}; } catch (e) { return {}; }
+})();
+function formatMsg(str, args) {
+  if (!args || !args.length) { return str; }
+  return String(str).replace(/\{(\d+)\}/g, (m, i) => (args[i] !== undefined ? args[i] : m));
+}
+function msgLang() {
+  try {
+    const ui = (cfg().get('uiLanguage', 'auto') || 'auto').toLowerCase();
+    if (ui === 'zh') { return 'zh'; }
+    if (ui === 'en') { return 'en'; }
+  } catch (e) { /* cfg 未初始化时按 auto */ }
+  const l = (vscode.env && vscode.env.language || '').toLowerCase();
+  return l.startsWith('zh') ? 'zh' : 'en';
+}
+const t = (id, args) => formatMsg(msgLang() === 'zh' ? (zhDict[id] || id) : id, args);
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1310,7 +1328,7 @@ async function verifyHunkSig(entry, index, sig) {
 
 async function rejectHunk(entry, index, sig) {
   if (sig && !(await verifyHunkSig(entry, index, sig))) {
-    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please refresh and retry.'));
+    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please wait for refresh and retry.'));
     return;
   }
   // 只记录拒绝决定，不立即改文件——和接受块对称：执行统一发生在「标记已审查」时，
@@ -1401,7 +1419,7 @@ async function currentSig(entry, index) {
 
 async function acceptHunk(entry, index, sig) {
   if (sig && !(await verifyHunkSig(entry, index, sig))) {
-    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please refresh and retry.'));
+    vscode.window.showWarningMessage(t('The file content changed and the block position no longer matches. Please wait for refresh and retry.'));
     return;
   }
   try {
@@ -1818,4 +1836,4 @@ function deactivate() {
   if (refreshTimer) { clearTimeout(refreshTimer); }
 }
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, __test: { t, zhDict } };
